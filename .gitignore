@@ -216,3 +216,40 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Restricted and local data
+data/*
+!data/README.md
+
+# Generated model outputs
+outputs/*
+!outputs/README.md
+
+# Proprietary or large data files
+*.parquet
+*.csv
+*.xlsx
+*.xls
+*.feather
+*.pkl
+*.pickle
+*.joblib
+*.dta
+*.sav
+*.zip
+
+# Credentials and local configuration
+.env
+*.env
+credentials*
+secrets*
+src/config_local.py
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Operating-system files
+Thumbs.db
+.DS_Store
