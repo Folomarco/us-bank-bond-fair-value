@@ -64,6 +64,18 @@ Scripts should be executed from the repository root. Project-relative paths,
 input filenames and output directories are defined in
 `src/config_institutional.py`.
 
+## Reproducibility
+
+The reported tables and figures are generated from saved model outputs rather
+than edited manually. Full numerical reproduction requires authorised access
+to the proprietary WRDS inputs described above.
+
+## Use of generative AI
+
+ChatGPT (OpenAI) was used as an interactive support tool for code review,
+debugging and documentation feedback. All final code, modelling decisions and
+reported results were selected, written and verified by the author.
+
 ## Author
 
 Marco Folonaro  
