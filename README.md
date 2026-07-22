@@ -72,9 +72,9 @@ to the proprietary WRDS inputs described above.
 
 ## Use of generative AI
 
-ChatGPT (OpenAI) was used as an interactive support tool for code review,
-debugging and documentation feedback. All final code, modelling decisions and
-reported results were selected, written and verified by the author.
+ChatGPT (OpenAI) was used as an interactive support tool for code review and
+debugging. All final code, modelling decisions and reported results were
+selected, written and verified by the author.
 
 ## Author
 
