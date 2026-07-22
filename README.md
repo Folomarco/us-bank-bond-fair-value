@@ -44,3 +44,13 @@ src/       Python source code
 data/      Description of the required input data
 outputs/   Description of the generated model outputs
 figures/   Figures generated for the dissertation
+```
+## Environment
+
+The code requires Python and the packages listed in `requirements.txt`.
+
+Install the dependencies with:
+
+```bash
+pip install -r requirements.txt
+```
