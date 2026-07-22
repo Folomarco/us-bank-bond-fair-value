@@ -54,3 +54,18 @@ Install the dependencies with:
 ```bash
 pip install -r requirements.txt
 ```
+
+## Execution
+
+The complete pipeline order and the role of each script are documented in
+[`src/README.md`](src/README.md).
+
+Scripts should be executed from the repository root. Project-relative paths,
+input filenames and output directories are defined in
+`src/config_institutional.py`.
+
+## Author
+
+Marco Folonaro  
+MSc Machine Learning and Data Science  
+Imperial College London
