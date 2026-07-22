@@ -37,21 +37,20 @@ The scripts are organised in the approximate execution order shown below.
 9. `rolling_fair_value_models.py`
    - estimates locked, rolling and expanding fixed-effect models.
 
-10. `dynamic_state_space_fair_value_models_kantas.py`
-    - estimates the initial dynamic linear model specifications.
+10. `dynamic_state_space_models.py`
+    - estimates the full-peer global, issuer and issuer--maturity dynamic
+      state-space models.
 
-11. `dynamic_state_space_extended_models_kantas.py`
-    - estimates the full-peer global, issuer and issuer--maturity state models.
-
-12. `dynamic_state_space_extended_models_no_sector_kantas.py`
-    - estimates the corresponding no-sector state-space robustness models.
+11. `dynamic_state_space_models_no_sector.py`
+    - estimates the corresponding no-sector dynamic state-space robustness
+      models.
 
 ## Residual analysis
 
-13. `residual_model_comparison.py`
+12. `residual_model_comparison.py`
     - compares residual diagnostics across static, expanding and dynamic models.
 
-14. `dislocation_signal_engine_v3.py`
+13. `dislocation_signal_engine.py`
     - constructs residual dislocation scores;
     - applies the price-quality classification;
     - produces uncertainty intervals and convergence diagnostics.
