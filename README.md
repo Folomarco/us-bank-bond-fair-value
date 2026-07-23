@@ -32,8 +32,9 @@ The analysis uses:
 - FRED Treasury, volatility and credit-market series.
 
 TRACE, TRACE Master File and CRSP data were accessed through WRDS and cannot
-be redistributed. This repository therefore contains no proprietary data or
-processed data derived from restricted WRDS files.
+be redistributed. The repository contains therefore no raw, row-level or reusable processed datasets
+derived from restricted WRDS files. It contains only source code,
+documentation and aggregate figures reproduced in the dissertation.
 
 Authorised users must supply their own local copies of the required inputs.
 
