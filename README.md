@@ -48,13 +48,16 @@ figures/   Figures generated for the dissertation
 ```
 ## Environment
 
-The code requires Python and the packages listed in `requirements.txt`.
+## Environment
 
-Install the dependencies with:
+The code was developed and tested with Python 3.10.2.
+
+Install the required packages with:
 
 ```bash
 pip install -r requirements.txt
 ```
+Install the dependencies with:
 
 ## Execution
 
