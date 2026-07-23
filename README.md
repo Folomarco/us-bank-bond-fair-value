@@ -48,8 +48,6 @@ figures/   Figures generated for the dissertation
 ```
 ## Environment
 
-## Environment
-
 The code was developed and tested with Python 3.10.2.
 
 Install the required packages with:
@@ -57,7 +55,6 @@ Install the required packages with:
 ```bash
 pip install -r requirements.txt
 ```
-Install the dependencies with:
 
 ## Execution
 
