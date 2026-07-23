@@ -3,9 +3,3 @@ pandas
 matplotlib
 scikit-learn
 pyarrow
-
-## Environment
-
-The code was developed and tested with Python 3.10 or later.
-Exact package versions used for the dissertation are listed in
-`requirements-lock.txt`.
