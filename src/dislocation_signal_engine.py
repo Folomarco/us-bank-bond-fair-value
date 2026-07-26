@@ -149,7 +149,7 @@ def _read_required_parquet(path: Path, description: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
             f"Missing {description}: {path}\n"
-            "Run peer_factor_models.py / peer_factor_models_v3.py first."
+            "Run peer_factor_models.py first."
         )
     return pd.read_parquet(path)
 
