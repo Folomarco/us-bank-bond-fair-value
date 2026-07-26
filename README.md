@@ -78,9 +78,10 @@ to the restricted TRACE, TRACE Master File and CRSP inputs described above.
 
 ## Use of generative AI
 
-ChatGPT (OpenAI) was used as an interactive support tool for code review and
-debugging. All final code, modelling decisions and reported results were
-selected, written and verified by the author.
+ChatGPT, including GPT-5.5 and GPT-5.6 Sol (OpenAI), was used to discuss
+technical concepts, review Python and LaTeX, and improve clarity. All
+suggestions were checked independently; the final code, modelling choices,
+analysis and interpretation are the author's own.
 
 ## Author
 
