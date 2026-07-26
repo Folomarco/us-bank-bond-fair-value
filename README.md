@@ -58,18 +58,23 @@ pip install -r requirements.txt
 
 ## Execution
 
-The complete pipeline order and the role of each script are documented in
+No wrapper scripts are included. Run the Python files manually from the
+repository root in the order documented in
 [`src/README.md`](src/README.md).
 
-Scripts should be executed from the repository root. Project-relative paths,
-input filenames and output directories are defined in
+Project-relative paths, input filenames and output directories are defined in
 `src/config_institutional.py`.
 
 ## Reproducibility
 
+The repository contains the final methodology-hardened source code used for the
+submitted dissertation, including the training-frozen sample construction,
+point-in-time peer factors, static and dynamic fair-value models, direct VWAP
+convergence diagnostics and the final post-run audit.
+
 The reported tables and figures are generated from saved model outputs rather
 than edited manually. Full numerical reproduction requires authorised access
-to the proprietary WRDS inputs described above.
+to the restricted TRACE, TRACE Master File and CRSP inputs described above.
 
 ## Use of generative AI
 
