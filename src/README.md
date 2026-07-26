@@ -1,6 +1,6 @@
 # Source code
 
-The scripts should be run manually from the repository root in the order shown
+The scripts should be run manually from the `src/` directory in the order shown
 below. Restricted TRACE, TRACE Master File and CRSP inputs must be supplied
 locally in `data/`.
 
