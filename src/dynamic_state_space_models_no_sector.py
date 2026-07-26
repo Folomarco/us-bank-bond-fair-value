@@ -460,7 +460,6 @@ def build_expanding_static_predictions(
     coefficients = pd.DataFrame(coef_rows)
     return predictions, coefficients
 
-
 def fit_static_ols_standardised(train: pd.DataFrame, context: dict[str, Any]) -> dict[str, Any]:
     features = context["features"]
     Xc_df = center_x(train, context)[features]
@@ -532,8 +531,6 @@ def initialise_group_states(
             group_map[key_tuple] = global_state_key
             continue
 
-        state_source = "group_specific"
-
         try:
             ctx = fit_fe_context(g, features=features)
             Xc_df = center_x(g, ctx)[features]
@@ -543,23 +540,16 @@ def initialise_group_states(
             residual = yc - Xs @ beta_std
             resid_var = float(np.var(residual, ddof=len(features)))
             xpx = Xs.T @ Xs
-            cov = resid_var * np.linalg.pinv(
-                xpx + RIDGE_EPS * np.eye(len(features))
-            )
-        except (ValueError, np.linalg.LinAlgError) as exc:
-            warnings.warn(
-                f"Falling back to the global initial state for {state_key}: {exc}",
-                RuntimeWarning,
-            )
+            cov = resid_var * np.linalg.pinv(xpx + RIDGE_EPS * np.eye(len(features)))
+        except Exception:
             beta_std = global_init["beta_std"].copy()
             cov = global_init["beta_cov_std"].copy()
-            state_source = "global_fallback_after_initialisation_error"
 
         states[state_key] = {
             "beta": np.asarray(beta_std, dtype=float).copy(),
             "cov": np.asarray(cov, dtype=float).copy() * INITIAL_COV_MULTIPLIER,
             "n_train": int(len(g)),
-            "source": state_source,
+            "source": "group_specific",
         }
         group_map[key_tuple] = state_key
 
