@@ -8,6 +8,7 @@ from pandas.tseries.offsets import DateOffset
 def _coupon_rate_to_decimal(x) -> float:
     if pd.isna(x):
         return np.nan
+
     return float(x) / 100.0
 
 
@@ -16,6 +17,7 @@ def _coupon_frequency_to_int(x, default_coupon_freq: int = 2) -> int:
         return default_coupon_freq
 
     value = str(x).strip().upper()
+
     mapping = {
         "1": 1,
         "A": 1,
@@ -185,36 +187,46 @@ def add_dirty_price_columns(
 
     out[prev_coupon_col] = pd.to_datetime(prev_coupon_dates)
     out[next_coupon_col] = pd.to_datetime(next_coupon_dates)
+
     numerators = [
         _day_count_30_360_us(start, end)
         for start, end in zip(out[prev_coupon_col], out[date_col])
     ]
+
     denominators = [
         _day_count_30_360_us(start, end)
         for start, end in zip(out[prev_coupon_col], out[next_coupon_col])
     ]
+
     numerator = pd.Series(numerators, index=out.index, dtype="float64")
     denominator = pd.Series(denominators, index=out.index, dtype="float64")
+
     accrual_fraction = numerator / denominator.replace(0, np.nan)
     accrual_fraction = accrual_fraction.clip(lower=0.0, upper=1.0)
+
     out[accrual_fraction_col] = accrual_fraction
+
     out[accrued_interest_col] = (
         100.0
         * coupon_decimal
         / coupon_freq.astype(float).replace(0, np.nan)
         * out[accrual_fraction_col]
     )
+
     out[dirty_price_col] = clean_price + out[accrued_interest_col]
     out[dirty_log_col] = np.log(out[dirty_price_col].where(out[dirty_price_col] > 0))
+
     coupon_cashflow_col = f"{prefix}_coupon_cashflow"
     coupon_paid_flag_col = f"{prefix}_coupon_paid_flag"
     prev_accrual_fraction_col = f"{prefix}_prev_accrual_fraction"
     dirty_simple_return_col = f"final_dirty_{prefix}_simple_return"
+
     coupon_payment = (
             100.0
             * coupon_decimal
             / coupon_freq.astype(float).replace(0, np.nan)
     )
+
     if group_col in out.columns:
         prev_dirty_price = out.groupby(group_col)[dirty_price_col].shift(1)
         prev_obs_date = out.groupby(group_col)[date_col].shift(1)
@@ -223,7 +235,9 @@ def add_dirty_price_columns(
         prev_dirty_price = out[dirty_price_col].shift(1)
         prev_obs_date = out[date_col].shift(1)
         prev_accrual_fraction = out[accrual_fraction_col].shift(1)
+
     out[prev_accrual_fraction_col] = prev_accrual_fraction
+
     coupon_date_crossed = (
             prev_obs_date.notna()
             & out[prev_coupon_col].notna()
@@ -231,32 +245,40 @@ def add_dirty_price_columns(
             & (prev_obs_date < out[prev_coupon_col])
             & (out[prev_coupon_col] <= out[date_col])
     )
+
     accrual_reset_detected = (
             prev_accrual_fraction.notna()
             & out[accrual_fraction_col].notna()
             & (out[accrual_fraction_col] + 1e-8 < prev_accrual_fraction)
     )
+
     coupon_paid_in_interval = coupon_date_crossed | accrual_reset_detected
+
     out[coupon_paid_flag_col] = coupon_paid_in_interval.astype(int)
+
     out[coupon_cashflow_col] = np.where(
         coupon_paid_in_interval,
         coupon_payment,
         0.0,
     )
+
     out[dirty_simple_return_col] = (
             (out[dirty_price_col] + out[coupon_cashflow_col])
             / prev_dirty_price
             - 1.0
     )
+
     out[return_col] = np.log1p(
         out[dirty_simple_return_col].where(out[dirty_simple_return_col] > -1.0)
     )
+
     valid_ai = (
         out[accrued_interest_col].notna()
         & out[dirty_price_col].notna()
         & out[prev_coupon_col].notna()
         & out[next_coupon_col].notna()
     )
+
     out[method_col] = np.where(
         valid_ai,
         f"proxy_{default_day_count.lower()}_freq{default_coupon_freq}",

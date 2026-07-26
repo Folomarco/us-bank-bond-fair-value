@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 import json
 from pathlib import Path
 
@@ -49,6 +48,16 @@ TARGET_SPECS = {
     "clean_last_price_return": {
         "column": "final_last_price_return",
         "family": "clean_price_return",
+        "is_main": False,
+    },
+    "reference_safe_vwap_return": {
+        "column": "final_reference_safe_vwap_return",
+        "family": "trace_lifecycle_robustness",
+        "is_main": False,
+    },
+    "strict_status_vwap_return": {
+        "column": "final_strict_status_vwap_return",
+        "family": "trace_lifecycle_robustness",
         "is_main": False,
     },
     "dirty_vwap_return": {
@@ -113,7 +122,6 @@ MODEL_SPECS = {
 
 SAVE_PREDICTIONS = True
 PREDICTION_SPLITS_TO_SAVE = ["validation", "test"]
-
 
 
 def assign_sample_split(df: pd.DataFrame) -> pd.DataFrame:
@@ -184,7 +192,7 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         "sse": sse,
         "n_obs": int(len(y_true)),
         "mean_residual": float(np.mean(residual)),
-        "std_residual": float(np.std(residual, ddof=1)),
+        "std_residual": float(np.std(residual)),
         "p01_residual": float(np.quantile(residual, 0.01)),
         "p05_residual": float(np.quantile(residual, 0.05)),
         "p50_residual": float(np.quantile(residual, 0.50)),
@@ -306,7 +314,6 @@ def assert_no_missing_features(df: pd.DataFrame, features: list[str], model_name
     missing = [c for c in features if c not in df.columns]
     if missing:
         raise ValueError(f"Missing features for {model_name}: {missing}")
-
 
 
 def main() -> None:

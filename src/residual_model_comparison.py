@@ -4,8 +4,10 @@ import json
 import warnings
 from pathlib import Path
 from typing import Any
+
 import numpy as np
 import pandas as pd
+
 from config_institutional import REGRESSION_DIR, TABLES_DIR, ensure_directories
 
 
@@ -14,7 +16,9 @@ DATE_COL = "date"
 SPLIT_COL = "sample_split"
 ISSUER_COL = "trace_company_symbol"
 MATURITY_BUCKET_COL = "peer_maturity_bucket"
+
 PANEL_PATH = REGRESSION_DIR / "regression_panel_gap5_with_peer_factors.parquet"
+
 OUTPUT_TABLE = TABLES_DIR / "residual_model_comparison_test.csv"
 OUTPUT_LATEX = TABLES_DIR / "residual_model_comparison_test_latex.tex"
 OUTPUT_MANIFEST = TABLES_DIR / "residual_model_comparison_manifest.json"
@@ -23,6 +27,7 @@ MIN_GROUP_HISTORY_OBS = 100
 MIN_CUSIP_HISTORY_OBS = 20
 CUSIP_ROLLING_WINDOW_OBS = 60
 MIN_GLOBAL_HISTORY_OBS = 500
+
 
 MODEL_SPECS = [
     {
@@ -89,6 +94,7 @@ MODEL_SPECS = [
     },
 ]
 
+
 def json_safe(x: Any) -> Any:
     if isinstance(x, Path):
         return str(x)
@@ -105,6 +111,7 @@ def json_safe(x: Any) -> Any:
     if isinstance(x, (list, tuple)):
         return [json_safe(v) for v in x]
     return x
+
 
 def read_parquet_required(path: Path, description: str) -> pd.DataFrame:
     if not path.exists():
@@ -127,9 +134,11 @@ def load_metadata() -> pd.DataFrame:
 def merge_metadata_if_needed(df: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out[DATE_COL] = pd.to_datetime(out[DATE_COL], errors="coerce")
+
     need_cols = [c for c in [ISSUER_COL, MATURITY_BUCKET_COL] if c not in out.columns]
     if not need_cols:
         return out
+
     if "_sample_index" in out.columns and "_sample_index" in meta.columns:
         add_cols = ["_sample_index"] + [c for c in [ISSUER_COL, MATURITY_BUCKET_COL] if c in meta.columns]
         out = out.merge(meta[add_cols].drop_duplicates("_sample_index"), on="_sample_index", how="left")
@@ -446,7 +455,7 @@ def main() -> None:
 
     manifest = {
         "script": "residual_model_comparison.py",
-        "purpose": "Residual comparison across static M4, expanding OLS M4 and dynamic state-space models.",
+        "purpose": "Residual comparison across static M4, expanding OLS M4 and Kantas-aligned DLM models.",
         "inputs": [json_safe(spec["path"]) for spec in MODEL_SPECS] + [json_safe(PANEL_PATH)],
         "outputs": {
             "summary_csv": OUTPUT_TABLE,

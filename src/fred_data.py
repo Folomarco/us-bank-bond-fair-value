@@ -1,3 +1,4 @@
+from pathlib import Path
 from functools import reduce
 import time
 from urllib.error import HTTPError, URLError
@@ -25,9 +26,7 @@ fred_baseline_path = OUT_DIR / "fred_baseline_driver_levels_and_changes.parquet"
 fred_baseline_csv_path = OUT_DIR / "fred_baseline_driver_levels_and_changes.csv"
 
 
-
 fred_series = {
-
     "dgs2": "DGS2",
     "dgs5": "DGS5",
     "dgs10": "DGS10",
@@ -255,7 +254,6 @@ else:
     print(drivers.tail())
 
 
-
     DIAG_DIR = OUT_DIR / "diagnostics"
     DIAG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -348,7 +346,6 @@ else:
 
 
     outlier_rules = {
-
         "d_dgs2": 0.25,
         "d_dgs5": 0.25,
         "d_dgs10": 0.25,
@@ -450,7 +447,6 @@ fred_baseline = drivers[baseline_cols_to_save].copy()
 
 fred_baseline.to_parquet(fred_baseline_path, index=False)
 fred_baseline.to_csv(fred_baseline_csv_path, index=False)
-
 
 drivers.to_parquet(drivers_path, index=False)
 drivers.to_csv(drivers_csv_path, index=False)

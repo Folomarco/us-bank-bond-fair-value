@@ -24,11 +24,13 @@ from config_institutional import (
     MODEL_READY_MAX_BUSINESS_GAP,
     EQUITY_ASOF_TOLERANCE_DAYS,
     EQUITY_ASOF_TOLERANCES_DAYS,
+    CORE_FRED_MAX_SOURCE_AGE_DAYS,
     ensure_directories,
 )
 
 from panel_integrity_audit import (
     assert_panel_integrity,
+    assert_no_future_source_dates,
     write_run_manifest,
 )
 
@@ -52,6 +54,10 @@ EQUITY_LEVEL_COLS = [
     "ret",
     "retx",
     "ret_with_dlret",
+    "log_total_return",
+    "cum_log_total_return",
+    "missing_total_return_flag",
+    "cum_missing_total_return_count",
     "log_market_cap",
     "d_log_market_cap",
     "equity_vol_20d",
@@ -107,7 +113,6 @@ def prepare_fred(fred: pd.DataFrame) -> pd.DataFrame:
     available_level_cols = [c for c in FRED_LEVEL_COLS if c in fred.columns]
     available_source_cols = [c for c in FRED_SOURCE_DATE_COLS if c in fred.columns]
 
-    # Forward-fill levels so that holiday/missing FRED values do not break interval alignment.
     fred[available_level_cols] = fred[available_level_cols].ffill()
 
     for col in available_source_cols:
@@ -260,16 +265,46 @@ def add_interval_features(panel: pd.DataFrame) -> pd.DataFrame:
                 np.exp(panel["sp500_log_return_interval"]) - 1.0
         )
 
+
+    if {
+        "issuer_cum_log_total_return_t",
+        "issuer_cum_log_total_return_prev",
+        "issuer_cum_missing_total_return_count_t",
+        "issuer_cum_missing_total_return_count_prev",
+    }.issubset(panel.columns):
+        missing_count_delta = (
+            pd.to_numeric(
+                panel["issuer_cum_missing_total_return_count_t"],
+                errors="coerce",
+            )
+            - pd.to_numeric(
+                panel["issuer_cum_missing_total_return_count_prev"],
+                errors="coerce",
+            )
+        )
+
+        panel["issuer_equity_interval_missing_return_count"] = missing_count_delta
+        valid_total_return_interval = missing_count_delta.eq(0)
+
+        total_log_return = (
+            pd.to_numeric(panel["issuer_cum_log_total_return_t"], errors="coerce")
+            - pd.to_numeric(panel["issuer_cum_log_total_return_prev"], errors="coerce")
+        )
+
+        panel["issuer_equity_log_return_interval"] = total_log_return.where(
+            valid_total_return_interval
+        )
+        panel["issuer_equity_simple_return_interval"] = (
+            np.exp(panel["issuer_equity_log_return_interval"]) - 1.0
+        )
+
     if {
         "issuer_log_adj_price_t",
         "issuer_log_adj_price_prev",
     }.issubset(panel.columns):
-        panel["issuer_equity_log_return_interval"] = (
+        panel["issuer_equity_price_log_return_interval"] = (
             panel["issuer_log_adj_price_t"]
             - panel["issuer_log_adj_price_prev"]
-        )
-        panel["issuer_equity_simple_return_interval"] = (
-            np.exp(panel["issuer_equity_log_return_interval"]) - 1.0
         )
 
     if {
@@ -303,6 +338,32 @@ def add_interval_features(panel: pd.DataFrame) -> pd.DataFrame:
     panel = panel.rename(
         columns={old: new for old, new in rename_map.items() if old in panel.columns}
     )
+
+    for fred_col, max_age_days in CORE_FRED_MAX_SOURCE_AGE_DAYS.items():
+        age_col = f"{fred_col}_max_age_days_interval"
+        if age_col not in panel.columns:
+            continue
+
+        age = pd.to_numeric(panel[age_col], errors="coerce")
+        if age.dropna().lt(0).any():
+            raise AssertionError(
+                f"Future FRED source date detected for {fred_col}."
+            )
+
+        stale = age.gt(float(max_age_days))
+        panel[f"{fred_col}_stale_source_flag"] = stale
+
+        if fred_col == "sp500":
+            for return_col in [
+                "sp500_log_return_interval",
+                "sp500_simple_return_interval",
+            ]:
+                if return_col in panel.columns:
+                    panel.loc[stale, return_col] = np.nan
+        else:
+            interval_col = f"d_{fred_col}_interval"
+            if interval_col in panel.columns:
+                panel.loc[stale, interval_col] = np.nan
 
     return panel
 
@@ -837,6 +898,7 @@ def write_pipeline_run_manifest() -> None:
         "model_ready_max_business_gap": MODEL_READY_MAX_BUSINESS_GAP,
         "equity_asof_tolerance_days": EQUITY_ASOF_TOLERANCE_DAYS,
         "equity_asof_tolerances_days": EQUITY_ASOF_TOLERANCES_DAYS,
+        "core_fred_max_source_age_days": CORE_FRED_MAX_SOURCE_AGE_DAYS,
         "trace_holiday_path": TRACE_HOLIDAY_PATH,
         "nyse_holiday_path": NYSE_HOLIDAY_PATH,
     }
@@ -926,6 +988,23 @@ def build_regression_panel(
 
     print("Adding interval-aligned features...")
     panel = add_interval_features(panel)
+
+    assert_no_future_source_dates(
+        panel,
+        target_date_col="date",
+        source_date_cols=[
+            f"{col}_source_date_t"
+            for col in FRED_LEVEL_COLS
+        ] + ["equity_date_t"],
+    )
+    assert_no_future_source_dates(
+        panel,
+        target_date_col="prev_date",
+        source_date_cols=[
+            f"{col}_source_date_prev"
+            for col in FRED_LEVEL_COLS
+        ] + ["equity_date_prev"],
+    )
 
     panel = panel.sort_values(["cusip_id", "date"]).reset_index(drop=True)
 

@@ -22,6 +22,15 @@ from config_institutional import (
     FIGURES_DIR,
     TRACE_MODEL_READY_DIRTY_PATH,
     TRACE_MODEL_READY_GAP5_DIRTY_PATH,
+    TRACE_BOND_DAY_FULL_PATH,
+    TRACE_BOND_DAY_LIQUID_EXPOST_PATH,
+    TRACE_BOND_DAY_LIQUID_POINT_IN_TIME_PATH,
+    TRAIN_END_DATE,
+    LIQUID_UNIVERSE_MODE,
+    MIN_ACTIVE_DAYS,
+    MIN_TOTAL_TRADES,
+    TRACE_CLEANER_SCHEMA_VERSION,
+    TRACE_STATUS_SCHEMA,
     ensure_directories,
 )
 
@@ -39,7 +48,6 @@ except ImportError:
 
 print("TRACE_CLEANED_TRADE_DIR:", TRACE_CLEANED_TRADE_DIR)
 print("TRACE_CLEANING_DIAG_DIR:", TRACE_CLEANING_DIAG_DIR)
-
 
 ensure_directories()
 TRACE_BUSINESS_CALENDAR = load_market_holidays(
@@ -72,21 +80,52 @@ print("Current working directory:", Path.cwd())
 print("Using RAW_DIR:", RAW_DIR.resolve())
 print("Zip files found:", [p.name for p in RAW_FILES])
 
-REGULAR_STATUS_VALUES = {
-    "T", "TRADE", "NEW", "N", "M", "O", "RPT", "REPORT", "NORMAL", "A", "ACCEPTED"
+TRACE_STATUS_POLICIES = {
+    "academic_tcw": {
+        "T": "regular",
+        "C": "cancel",
+        "W": "correction",
+    },
+    "enhanced_txcyr": {
+        "T": "regular",
+        "X": "cancel",
+        "C": "cancelled_correction",
+        "R": "correction",
+        "Y": "reversal",
+    },
+    "wrds_mno": {
+        "M": "regular",
+        "N": "cancel",
+        "O": "correction",
+    },
 }
-REGULAR_FRMT_VALUES = {
-    "A", "E"
+
+TEXTUAL_STATUS_ACTIONS = {
+    "TRADE": "regular",
+    "NEW": "regular",
+    "RPT": "regular",
+    "REPORT": "regular",
+    "NORMAL": "regular",
+    "ACCEPTED": "regular",
+    "CANCEL": "cancel",
+    "CANCELLED": "cancel",
+    "CANCELED": "cancel",
+    "DELETE": "cancel",
+    "DELETED": "cancel",
+    "VOID": "cancel",
+    "CORR": "correction",
+    "CORRECT": "correction",
+    "CORRECTED": "correction",
+    "CORRECTION": "correction",
+    "AMEND": "correction",
+    "AMENDED": "correction",
+    "REV": "reversal",
+    "REVERSE": "reversal",
+    "REVERSED": "reversal",
+    "REVERSAL": "reversal",
 }
-CANCEL_STATUS_VALUES = {
-    "C", "X", "CANCEL", "CANCELLED", "CANCELED", "DELETE", "DELETED", "VOID"
-}
-CORRECTION_STATUS_VALUES = {
-    "W", "Y", "CORR", "CORRECT", "CORRECTED", "CORRECTION", "AMEND", "AMENDED"
-}
-REVERSAL_STATUS_VALUES = {
-    "R", "REV", "REVERSE", "REVERSED", "REVERSAL"
-}
+
+REGULAR_FRMT_VALUES = {"A", "E"}
 
 SPECIAL_FRMT_VALUES = {
     "CANCEL", "CANCELLED", "CANCELED", "CORR", "CORRECT", "CORRECTION",
@@ -100,8 +139,6 @@ MIN_YIELD = -5.0
 MAX_YIELD = 30.0
 INSTITUTIONAL_TRADE_SIZE = 100_000.0
 
-MIN_ACTIVE_DAYS = 100
-MIN_TOTAL_TRADES = 250
 MODEL_READY_MAX_BUSINESS_GAP = 5
 GAP_THRESHOLDS = [1, 3, 5, 10]
 MAX_SENSITIVITY_GAP = max(GAP_THRESHOLDS)
@@ -137,32 +174,14 @@ def to_numeric_safe(s: pd.Series) -> pd.Series:
 
 
 def clean_string_series(s: pd.Series) -> pd.Series:
-    out = s.astype(str).str.upper().str.strip()
-    out = out.replace(
-        {
-            "": np.nan,
-            ".": np.nan,
-            "NAN": np.nan,
-            "NA": np.nan,
-            "NONE": np.nan,
-            "<NA>": np.nan,
-        }
-    )
+    out = s.astype("string").str.upper().str.strip()
+    out = out.mask(out.isin(["", ".", "NAN", "NA", "NONE", "<NA>"]))
     return out
 
 
 def clean_id_series(s: pd.Series) -> pd.Series:
-    raw = s.astype(str).str.strip()
-    raw = raw.replace(
-        {
-            "": np.nan,
-            ".": np.nan,
-            "nan": np.nan,
-            "NaN": np.nan,
-            "None": np.nan,
-            "<NA>": np.nan,
-        }
-    )
+    raw = s.astype("string").str.strip()
+    raw = raw.mask(raw.isin(["", ".", "nan", "NaN", "None", "<NA>"]))
 
     numeric = pd.to_numeric(raw, errors="coerce")
     integer_like = numeric.notna() & np.isclose(numeric % 1, 0)
@@ -606,40 +625,201 @@ def clean_trade_chunk(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def classify_status_values(df: pd.DataFrame) -> pd.DataFrame:
+def detect_trace_status_policy(
+    parquet_files: Iterable[Path],
+) -> tuple[str, dict[str, str], pd.DataFrame]:
+    counts: dict[str, int] = {}
+
+    for path in parquet_files:
+        try:
+            temp = pd.read_parquet(path, columns=["trc_st"])
+        except Exception:
+            temp = pd.read_parquet(path)
+            if "trc_st" not in temp.columns:
+                continue
+
+        status = clean_string_series(temp["trc_st"])
+        for value, count in status.value_counts(dropna=False).items():
+            if pd.isna(value):
+                continue
+            value_str = str(value).upper().strip()
+            counts[value_str] = counts.get(value_str, 0) + int(count)
+
+    observed = set(counts)
+    short_codes = {x for x in observed if len(x) == 1}
+
+    requested = str(TRACE_STATUS_SCHEMA).strip().lower()
+    if requested in TRACE_STATUS_POLICIES:
+        schema = requested
+    elif requested not in {"auto", ""}:
+        raise ValueError(
+            f"Unknown TRACE_STATUS_SCHEMA={TRACE_STATUS_SCHEMA!r}. "
+            f"Use 'auto' or one of {sorted(TRACE_STATUS_POLICIES)}."
+        )
+    elif short_codes.issubset({"T", "C", "W"}) and "W" in short_codes:
+        schema = "academic_tcw"
+    elif short_codes.issubset({"T", "X", "C", "R", "Y"}) and (
+        short_codes & {"X", "R", "Y"}
+    ):
+        schema = "enhanced_txcyr"
+    elif short_codes.issubset({"M", "N", "O"}) and "M" in short_codes:
+
+        schema = "wrds_mno"
+    elif short_codes in ({"T"}, {"T", "C"}, set()):
+
+        schema = "academic_tcw"
+    else:
+        audit = pd.DataFrame(
+            [
+                {"trc_st": key, "n_reports": value}
+                for key, value in sorted(counts.items())
+            ]
+        )
+        audit.to_csv(
+            TRACE_CLEANING_DIAG_DIR / "trace_status_schema_detection.csv",
+            index=False,
+        )
+        raise ValueError(
+            "Could not unambiguously detect the TRACE status schema from "
+            f"short codes {sorted(short_codes)}. Inspect "
+            "trace_status_schema_detection.csv and set TRACE_STATUS_SCHEMA "
+            "explicitly in config_institutional.py."
+        )
+
+    policy = dict(TRACE_STATUS_POLICIES[schema])
+    policy.update(TEXTUAL_STATUS_ACTIONS)
+
+    unknown = observed - set(policy)
+    if unknown:
+        audit = pd.DataFrame(
+            [
+                {
+                    "trc_st": key,
+                    "n_reports": value,
+                    "detected_schema": schema,
+                    "mapped_action": policy.get(key, "UNMAPPED"),
+                }
+                for key, value in sorted(counts.items())
+            ]
+        )
+        audit.to_csv(
+            TRACE_CLEANING_DIAG_DIR / "trace_status_schema_detection.csv",
+            index=False,
+        )
+        raise ValueError(
+            "Unmapped TRACE status values remain after schema detection: "
+            f"{sorted(unknown)}. The cleaner stops rather than guessing."
+        )
+
+    audit = pd.DataFrame(
+        [
+            {
+                "trc_st": key,
+                "n_reports": value,
+                "detected_schema": schema,
+                "mapped_action": policy[key],
+            }
+            for key, value in sorted(counts.items())
+        ]
+    )
+    audit.to_csv(
+        TRACE_CLEANING_DIAG_DIR / "trace_status_schema_detection.csv",
+        index=False,
+    )
+    return schema, policy, audit
+
+
+def classify_status_values(
+    df: pd.DataFrame,
+    status_policy: dict[str, str],
+) -> pd.DataFrame:
     rows = []
 
-    for field, regular, cancel, correction, reversal, special in [
-        ("trc_st", REGULAR_STATUS_VALUES, CANCEL_STATUS_VALUES, CORRECTION_STATUS_VALUES, REVERSAL_STATUS_VALUES, set()),
-        ("frmt_cd", REGULAR_FRMT_VALUES, CANCEL_STATUS_VALUES, CORRECTION_STATUS_VALUES, REVERSAL_STATUS_VALUES, SPECIAL_FRMT_VALUES),
-    ]:
-        if field not in df.columns:
-            continue
-
-        vc = df[field].astype("object").where(df[field].notna(), "<MISSING>").value_counts(dropna=False)
+    if "trc_st" in df.columns:
+        vc = (
+            df["trc_st"]
+            .astype("object")
+            .where(df["trc_st"].notna(), "<MISSING>")
+            .value_counts(dropna=False)
+        )
         for value, count in vc.items():
             value_str = str(value).upper().strip()
-            if value_str in cancel:
-                action = "drop_report_and_referenced_original"
-            elif value_str in reversal:
-                action = "drop_report_and_referenced_original"
-            elif value_str in correction:
-                action = "drop_referenced_original_keep_correcting_report_if_valid"
-            elif value_str in special:
+            rows.append(
+                {
+                    "field": "trc_st",
+                    "value": value,
+                    "count": int(count),
+                    "cleaner_action": (
+                        "missing_value_no_action_by_itself"
+                        if value_str == "<MISSING>"
+                        else status_policy.get(value_str, "UNMAPPED")
+                    ),
+                }
+            )
+
+    if "frmt_cd" in df.columns:
+        vc = (
+            df["frmt_cd"]
+            .astype("object")
+            .where(df["frmt_cd"].notna(), "<MISSING>")
+            .value_counts(dropna=False)
+        )
+        for value, count in vc.items():
+            value_str = str(value).upper().strip()
+            if value_str in SPECIAL_FRMT_VALUES:
                 action = "drop_special_condition_from_price_sample"
-            elif value_str in regular:
-                action = "regular_or_new_trade"
+            elif value_str in REGULAR_FRMT_VALUES:
+                action = "regular_format"
             elif value_str == "<MISSING>":
                 action = "missing_value_no_action_by_itself"
             else:
-                action = "unmapped_diagnose_before_tightening"
-
-            rows.append({"field": field, "value": value, "count": int(count), "cleaner_action": action})
+                action = "unmapped_format_strict_sample_excludes"
+            rows.append(
+                {
+                    "field": "frmt_cd",
+                    "value": value,
+                    "count": int(count),
+                    "cleaner_action": action,
+                }
+            )
 
     return pd.DataFrame(rows)
 
 
-def apply_trace_cleaner(df: pd.DataFrame, file_name: str = "") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_status_cross_tab(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
+    if "trc_st" not in df.columns:
+        return pd.DataFrame()
+
+    status = df["trc_st"].astype("object").where(
+        df["trc_st"].notna(),
+        "<MISSING>",
+    )
+    if "frmt_cd" in df.columns:
+        frmt = df["frmt_cd"].astype("object").where(
+            df["frmt_cd"].notna(),
+            "<MISSING>",
+        )
+    else:
+        frmt = pd.Series("<MISSING>", index=df.index)
+
+    out = (
+        pd.DataFrame({"trc_st": status, "frmt_cd": frmt})
+        .value_counts(dropna=False)
+        .rename("n_reports")
+        .reset_index()
+    )
+    out.insert(0, "file", file_name)
+    return out
+
+
+def apply_trace_cleaner(
+    df: pd.DataFrame,
+    unique_reference_keys: set[tuple[str, str, pd.Timestamp]],
+    ambiguous_reference_keys: set[tuple[str, str, pd.Timestamp]],
+    status_policy: dict[str, str],
+    status_schema: str,
+    file_name: str = "",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df = df.copy()
 
     cusip_col = pick_col(df, ["cusip_id"])
@@ -652,66 +832,192 @@ def apply_trace_cleaner(df: pd.DataFrame, file_name: str = "") -> tuple[pd.DataF
 
     required = [cusip_col, date_col, price_col, volume_col]
     if any(col is None for col in required):
-        raise ValueError(f"Missing required TRACE columns in {file_name}. Available columns: {df.columns.tolist()}")
+        raise ValueError(
+            f"Missing required TRACE columns in {file_name}. "
+            f"Available columns: {df.columns.tolist()}"
+        )
 
-    status = df["trc_st"] if "trc_st" in df.columns else pd.Series(np.nan, index=df.index)
-    frmt = df["frmt_cd"] if "frmt_cd" in df.columns else pd.Series(np.nan, index=df.index)
+    status = (
+        df["trc_st"]
+        if "trc_st" in df.columns
+        else pd.Series(pd.NA, index=df.index, dtype="object")
+    )
+    frmt = (
+        df["frmt_cd"]
+        if "frmt_cd" in df.columns
+        else pd.Series(pd.NA, index=df.index, dtype="object")
+    )
+    status = clean_string_series(status)
+    frmt = clean_string_series(frmt)
 
-    df["is_cancel_report"] = status.isin(CANCEL_STATUS_VALUES) | frmt.isin(CANCEL_STATUS_VALUES)
-    df["is_correction_report"] = status.isin(CORRECTION_STATUS_VALUES) | frmt.isin(CORRECTION_STATUS_VALUES)
-    df["is_reversal_report"] = status.isin(REVERSAL_STATUS_VALUES) | frmt.isin(REVERSAL_STATUS_VALUES)
+    status_action = status.map(status_policy)
+    unmapped_status = status.notna() & status_action.isna()
+    if unmapped_status.any():
+        values = sorted(status.loc[unmapped_status].astype(str).unique())
+        raise ValueError(
+            f"Unmapped TRACE statuses in {file_name}: {values}. "
+            "The cleaner stops rather than assigning an uncertain lifecycle action."
+        )
+
+    df["trace_status_action"] = status_action
+    df["is_cancel_report"] = status_action.isin(
+        {"cancel", "cancelled_correction"}
+    )
+    df["is_correction_report"] = status_action.eq("correction")
+    df["is_reversal_report"] = status_action.eq("reversal")
+
     df["is_special_condition"] = frmt.isin(SPECIAL_FRMT_VALUES)
+    df["is_regular_status"] = status_action.eq("regular")
+    df["is_regular_format"] = frmt.isin(REGULAR_FRMT_VALUES)
 
     if "orig_msg_seq_nb" in df.columns:
         df["has_orig_msg_seq_nb"] = df["orig_msg_seq_nb"].notna()
-        referenced_ids = set(df.loc[df["has_orig_msg_seq_nb"], "orig_msg_seq_nb"].dropna().astype(str))
     else:
         df["has_orig_msg_seq_nb"] = False
-        referenced_ids = set()
 
-    if "msg_seq_nb" in df.columns and referenced_ids:
-        df["is_referenced_original"] = df["msg_seq_nb"].astype(str).isin(referenced_ids)
+    current_dates = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+    if "msg_seq_nb" in df.columns:
+        current_keys = list(
+            zip(
+                df[cusip_col].astype(str),
+                df["msg_seq_nb"].astype(str),
+                current_dates,
+            )
+        )
+        df["is_referenced_original_unique"] = [
+            key in unique_reference_keys for key in current_keys
+        ]
+        df["is_referenced_original_ambiguous"] = [
+            key in ambiguous_reference_keys for key in current_keys
+        ]
     else:
-        df["is_referenced_original"] = False
+        df["is_referenced_original_unique"] = False
+        df["is_referenced_original_ambiguous"] = False
+
+    if "orig_msg_seq_nb" in df.columns:
+        reference_target_keys = list(
+            zip(
+                df[cusip_col].astype(str),
+                clean_id_series(df["orig_msg_seq_nb"]).astype(str),
+                current_dates,
+            )
+        )
+        df["reference_target_resolved_unique"] = [
+            key in unique_reference_keys for key in reference_target_keys
+        ]
+        df["reference_target_resolved_ambiguous"] = [
+            key in ambiguous_reference_keys for key in reference_target_keys
+        ]
+    else:
+        df["reference_target_resolved_unique"] = False
+        df["reference_target_resolved_ambiguous"] = False
+
+    df["is_usable_trade_message"] = (
+        df["is_regular_status"] | df["is_correction_report"]
+    )
+    if status_schema == "wrds_mno":
+        df["is_usable_trade_message"] = (
+            df["is_regular_status"]
+            | (
+                df["is_correction_report"]
+                & df["reference_target_resolved_unique"]
+            )
+        )
+
+    df["is_referenced_original"] = df["is_referenced_original_unique"]
+    df["is_referenced_original_any"] = (
+        df["is_referenced_original_unique"]
+        | df["is_referenced_original_ambiguous"]
+    )
 
     df["valid_date"] = df[date_col].notna()
-    df["valid_cusip"] = df[cusip_col].notna() & df[cusip_col].astype(str).str.strip().ne("")
+    df["valid_cusip"] = (
+        df[cusip_col].notna()
+        & df[cusip_col].astype(str).str.strip().ne("")
+    )
     df["valid_price"] = df[price_col].between(MIN_PRICE, MAX_PRICE)
     df["valid_volume"] = df[volume_col].gt(0)
 
     if yield_col:
-        df["valid_yield"] = df[yield_col].isna() | df[yield_col].between(MIN_YIELD, MAX_YIELD)
+        df["valid_yield"] = (
+            df[yield_col].isna()
+            | df[yield_col].between(MIN_YIELD, MAX_YIELD)
+        )
     else:
         df["valid_yield"] = True
 
     if subprd_col:
-        df["is_corporate_trade"] = df[subprd_col].astype(str).str.upper().str.strip().eq("CORP")
+        df["is_corporate_trade"] = (
+            df[subprd_col].astype(str).str.upper().str.strip().eq("CORP")
+        )
     else:
         df["is_corporate_trade"] = True
 
     duplicate_key = [
-        c for c in [cusip_col, date_col, time_col, "execution_ts", price_col, volume_col, "side", "rptg_party_type", "contra_party_type", "msg_seq_nb"]
+        c
+        for c in [
+            cusip_col,
+            date_col,
+            time_col,
+            "execution_ts",
+            price_col,
+            volume_col,
+            "side",
+            "rptg_party_type",
+            "contra_party_type",
+            "msg_seq_nb",
+        ]
         if c is not None and c in df.columns
     ]
-    df["is_exact_duplicate"] = df.duplicated(duplicate_key, keep="first") if duplicate_key else False
+    df["is_exact_duplicate"] = (
+        df.duplicated(duplicate_key, keep="first")
+        if duplicate_key
+        else False
+    )
 
-    agency_key = [c for c in [cusip_col, "execution_ts", price_col, volume_col] if c is not None and c in df.columns]
-    df["is_potential_agency_duplicate"] = df.duplicated(agency_key, keep=False) if agency_key else False
+    agency_key = [
+        c
+        for c in [cusip_col, "execution_ts", price_col, volume_col]
+        if c is not None and c in df.columns
+    ]
+    df["is_potential_agency_duplicate"] = (
+        df.duplicated(agency_key, keep=False)
+        if agency_key
+        else False
+    )
 
-    df["basic_valid_trade"] = (
+    df["basic_valid_price_trade"] = (
         df["valid_date"]
         & df["valid_cusip"]
         & df["is_corporate_trade"]
         & df["valid_price"]
         & df["valid_volume"]
-        & df["valid_yield"]
     )
 
     df["clean_price_sample"] = (
-        df["basic_valid_trade"]
+        df["basic_valid_price_trade"]
+        & df["is_usable_trade_message"]
+        & ~df["is_referenced_original_unique"]
+        & ~df["is_exact_duplicate"]
+        & ~df["is_special_condition"]
+    )
+    df["clean_yield_sample"] = (
+        df["clean_price_sample"]
+        & df["valid_yield"]
+    )
+    df["clean_price_reference_safe_sample"] = (
+        df["clean_price_sample"]
+        & ~df["is_referenced_original_ambiguous"]
+    )
+    df["clean_price_strict_status_sample"] = (
+        df["basic_valid_price_trade"]
+        & df["is_regular_status"]
+        & df["is_regular_format"]
         & ~df["is_cancel_report"]
+        & ~df["is_correction_report"]
         & ~df["is_reversal_report"]
-        & ~df["is_referenced_original"]
+        & ~df["has_orig_msg_seq_nb"]
+        & ~df["is_referenced_original_any"]
         & ~df["is_exact_duplicate"]
         & ~df["is_special_condition"]
     )
@@ -721,21 +1027,24 @@ def apply_trace_cleaner(df: pd.DataFrame, file_name: str = "") -> tuple[pd.DataF
         & df["valid_cusip"]
         & df["is_corporate_trade"]
         & df["valid_volume"]
-        & ~df["is_cancel_report"]
-        & ~df["is_reversal_report"]
-        & ~df["is_referenced_original"]
+        & df["is_usable_trade_message"]
+        & ~df["is_referenced_original_unique"]
         & ~df["is_exact_duplicate"]
     )
 
     df["clean_institutional_price_sample"] = (
-        df["clean_price_sample"] & df[volume_col].ge(INSTITUTIONAL_TRADE_SIZE)
+        df["clean_price_sample"]
+        & df[volume_col].ge(INSTITUTIONAL_TRADE_SIZE)
     )
     df["clean_price_no_agency_sample"] = (
-        df["clean_price_sample"] & ~df["is_potential_agency_duplicate"]
+        df["clean_price_sample"]
+        & ~df["is_potential_agency_duplicate"]
     )
+    df["_cleaner_schema_version"] = TRACE_CLEANER_SCHEMA_VERSION
+    df["_trace_status_schema"] = status_schema
 
     waterfall = build_trade_cleaning_waterfall(df, file_name=file_name)
-    mapping = classify_status_values(df)
+    mapping = classify_status_values(df, status_policy=status_policy)
     if not mapping.empty:
         mapping.insert(0, "file", file_name)
 
@@ -743,17 +1052,47 @@ def apply_trace_cleaner(df: pd.DataFrame, file_name: str = "") -> tuple[pd.DataF
 
 
 def build_trade_cleaning_waterfall(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
+    base = df["basic_valid_price_trade"]
     steps: list[tuple[str, pd.Series]] = [
         ("raw_rows", pd.Series(True, index=df.index)),
         ("valid_date_and_cusip", df["valid_date"] & df["valid_cusip"]),
-        ("corporate_trades", df["valid_date"] & df["valid_cusip"] & df["is_corporate_trade"]),
-        ("valid_price_volume_yield", df["basic_valid_trade"]),
-        ("drop_cancellations_reversals", df["basic_valid_trade"] & ~df["is_cancel_report"] & ~df["is_reversal_report"]),
-        ("drop_referenced_originals", df["basic_valid_trade"] & ~df["is_cancel_report"] & ~df["is_reversal_report"] & ~df["is_referenced_original"]),
-        ("drop_exact_duplicates", df["basic_valid_trade"] & ~df["is_cancel_report"] & ~df["is_reversal_report"] & ~df["is_referenced_original"] & ~df["is_exact_duplicate"]),
+        (
+            "corporate_trades",
+            df["valid_date"] & df["valid_cusip"] & df["is_corporate_trade"],
+        ),
+        ("valid_price_and_volume", base),
+        (
+            "drop_nonprice_lifecycle_messages",
+            base & df["is_usable_trade_message"],
+        ),
+        (
+            "drop_uniquely_referenced_originals",
+            base
+            & df["is_usable_trade_message"]
+            & ~df["is_referenced_original_unique"],
+        ),
+        (
+            "drop_exact_duplicates",
+            base
+            & df["is_usable_trade_message"]
+            & ~df["is_referenced_original_unique"]
+            & ~df["is_exact_duplicate"],
+        ),
         ("clean_price_sample", df["clean_price_sample"]),
+        ("clean_yield_sample", df["clean_yield_sample"]),
+        (
+            "clean_price_reference_safe_sample",
+            df["clean_price_reference_safe_sample"],
+        ),
+        (
+            "clean_price_strict_status_sample",
+            df["clean_price_strict_status_sample"],
+        ),
         ("clean_volume_sample", df["clean_volume_sample"]),
-        ("institutional_price_sample", df["clean_institutional_price_sample"]),
+        (
+            "institutional_price_sample",
+            df["clean_institutional_price_sample"],
+        ),
         ("price_no_agency_sample", df["clean_price_no_agency_sample"]),
     ]
 
@@ -763,15 +1102,23 @@ def build_trade_cleaning_waterfall(df: pd.DataFrame, file_name: str) -> pd.DataF
     for step, mask in steps:
         mask = mask.fillna(False)
         n_rows = int(mask.sum())
-        n_cusips = int(df.loc[mask, "cusip_id"].nunique()) if "cusip_id" in df.columns else np.nan
+        n_cusips = (
+            int(df.loc[mask, "cusip_id"].nunique())
+            if "cusip_id" in df.columns
+            else np.nan
+        )
         rows.append(
             {
                 "file": file_name,
                 "step": step,
                 "rows_remaining": n_rows,
                 "cusips_remaining": n_cusips,
-                "rows_lost_since_previous_step": 0 if previous_count is None else previous_count - n_rows,
-                "cusips_lost_since_previous_step": 0 if previous_cusips is None else previous_cusips - n_cusips,
+                "rows_lost_since_previous_step": (
+                    0 if previous_count is None else previous_count - n_rows
+                ),
+                "cusips_lost_since_previous_step": (
+                    0 if previous_cusips is None else previous_cusips - n_cusips
+                ),
                 "share_of_raw_rows": n_rows / len(df) if len(df) else np.nan,
             }
         )
@@ -801,6 +1148,42 @@ def add_trade_side_fields(df: pd.DataFrame, volume_col: str) -> pd.DataFrame:
     return df
 
 
+def _aggregate_alternative_vwap(
+    df: pd.DataFrame,
+    sample_col: str,
+    prefix: str,
+    cusip_col: str,
+    date_col: str,
+    price_col: str,
+    volume_col: str,
+) -> pd.DataFrame:
+    if sample_col not in df.columns:
+        return pd.DataFrame(columns=[cusip_col, date_col])
+
+    temp = df.loc[df[sample_col]].copy()
+    if temp.empty:
+        return pd.DataFrame(columns=[cusip_col, date_col])
+
+    temp = temp.sort_values([cusip_col, date_col, "execution_ts"])
+    temp["_alt_px_vol"] = temp[price_col] * temp[volume_col]
+    out = (
+        temp.groupby([cusip_col, date_col])
+        .agg(
+            **{
+                f"{prefix}_n_trades": (price_col, "size"),
+                f"{prefix}_price_sample_volume": (volume_col, "sum"),
+                f"{prefix}_px_vol_sum": ("_alt_px_vol", "sum"),
+            }
+        )
+        .reset_index()
+    )
+    out[f"{prefix}_vwap_price"] = (
+        out[f"{prefix}_px_vol_sum"]
+        / out[f"{prefix}_price_sample_volume"]
+    )
+    return out.drop(columns=[f"{prefix}_px_vol_sum"])
+
+
 def aggregate_cleaned_year(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
     cusip_col = pick_col(df, ["cusip_id"])
     date_col = pick_col(df, ["trd_exctn_dt"])
@@ -810,23 +1193,32 @@ def aggregate_cleaned_year(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
 
     df_price = df.loc[df["clean_price_sample"]].copy()
     df_volume = df.loc[df["clean_volume_sample"]].copy()
+    df_yield = df.loc[df["clean_yield_sample"]].copy()
 
     if df_price.empty:
         print(f"WARNING: no clean price trades in {file_name}.")
         return pd.DataFrame()
 
-    for temp in [df_price, df_volume]:
-        temp.sort_values([cusip_col, date_col, "execution_ts"], inplace=True)
+    for temp in [df_price, df_volume, df_yield]:
+        if not temp.empty:
+            temp.sort_values([cusip_col, date_col, "execution_ts"], inplace=True)
 
     df_price["_px_vol"] = df_price[price_col] * df_price[volume_col]
     df_price = add_trade_side_fields(df_price, volume_col)
     df_volume = add_trade_side_fields(df_volume, volume_col)
-
     group_cols = [cusip_col, date_col]
 
     price_agg = {
-        "company_symbol": ("company_symbol", "first") if "company_symbol" in df_price.columns else (cusip_col, "size"),
-        "bond_sym_id": ("bond_sym_id", "first") if "bond_sym_id" in df_price.columns else (cusip_col, "size"),
+        "company_symbol": (
+            ("company_symbol", "first")
+            if "company_symbol" in df_price.columns
+            else (cusip_col, "size")
+        ),
+        "bond_sym_id": (
+            ("bond_sym_id", "first")
+            if "bond_sym_id" in df_price.columns
+            else (cusip_col, "size")
+        ),
         "n_trades": (price_col, "size"),
         "price_sample_volume": (volume_col, "sum"),
         "median_price": (price_col, "median"),
@@ -836,25 +1228,61 @@ def aggregate_cleaned_year(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
         "max_price": (price_col, "max"),
         "price_std": (price_col, "std"),
         "px_vol_sum": ("_px_vol", "sum"),
-        "institutional_price_trades": ("clean_institutional_price_sample", "sum"),
+        "institutional_price_trades": (
+            "clean_institutional_price_sample",
+            "sum",
+        ),
         "no_agency_price_trades": ("clean_price_no_agency_sample", "sum"),
-        "potential_agency_duplicate_trades": ("is_potential_agency_duplicate", "sum"),
+        "potential_agency_duplicate_trades": (
+            "is_potential_agency_duplicate",
+            "sum",
+        ),
         "correction_report_trades": ("is_correction_report", "sum"),
+        "ambiguous_reference_trades": (
+            "is_referenced_original_ambiguous",
+            "sum",
+        ),
     }
 
-    if yield_col:
-        price_agg.update(
-            {
-                "median_yield": (yield_col, "median"),
-                "first_yield": (yield_col, "first"),
-                "last_yield": (yield_col, "last"),
-                "yield_std": (yield_col, "std"),
-            }
-        )
-
     daily_price = df_price.groupby(group_cols).agg(**price_agg).reset_index()
-    daily_price["vwap_price"] = daily_price["px_vol_sum"] / daily_price["price_sample_volume"]
+    daily_price["vwap_price"] = (
+        daily_price["px_vol_sum"] / daily_price["price_sample_volume"]
+    )
     daily_price = daily_price.drop(columns=["px_vol_sum"])
+
+    if yield_col and not df_yield.empty:
+        daily_yield = (
+            df_yield.groupby(group_cols)
+            .agg(
+                median_yield=(yield_col, "median"),
+                first_yield=(yield_col, "first"),
+                last_yield=(yield_col, "last"),
+                yield_std=(yield_col, "std"),
+                yield_sample_n_trades=(yield_col, "size"),
+            )
+            .reset_index()
+        )
+        daily_price = daily_price.merge(daily_yield, on=group_cols, how="left")
+
+    for sample_col, prefix in [
+        ("clean_price_reference_safe_sample", "reference_safe"),
+        ("clean_price_strict_status_sample", "strict_status"),
+    ]:
+        alternative = _aggregate_alternative_vwap(
+            df=df,
+            sample_col=sample_col,
+            prefix=prefix,
+            cusip_col=cusip_col,
+            date_col=date_col,
+            price_col=price_col,
+            volume_col=volume_col,
+        )
+        if len(alternative):
+            daily_price = daily_price.merge(
+                alternative,
+                on=group_cols,
+                how="left",
+            )
 
     volume_agg = {
         "volume_sample_n_trades": (volume_col, "size"),
@@ -866,8 +1294,12 @@ def aggregate_cleaned_year(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
     daily_volume = df_volume.groupby(group_cols).agg(**volume_agg).reset_index()
 
     daily = daily_price.merge(daily_volume, on=group_cols, how="left")
-    daily["total_volume"] = daily["total_volume"].fillna(daily["price_sample_volume"])
-    daily["volume_sample_n_trades"] = daily["volume_sample_n_trades"].fillna(daily["n_trades"])
+    daily["total_volume"] = daily["total_volume"].fillna(
+        daily["price_sample_volume"]
+    )
+    daily["volume_sample_n_trades"] = daily["volume_sample_n_trades"].fillna(
+        daily["n_trades"]
+    )
 
     denom = daily["buy_volume"] + daily["sell_volume"]
     daily["buy_sell_imbalance"] = np.where(
@@ -875,15 +1307,45 @@ def aggregate_cleaned_year(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
         (daily["buy_volume"] - daily["sell_volume"]) / denom,
         np.nan,
     )
-
     daily["price_range"] = daily["max_price"] - daily["min_price"]
     daily["price_range_rel"] = daily["price_range"] / daily["vwap_price"]
     daily["price_dispersion_rel"] = daily["price_std"] / daily["vwap_price"]
-    daily["institutional_trade_share"] = daily["institutional_price_trades"] / daily["n_trades"]
-    daily["potential_agency_duplicate_share"] = daily["potential_agency_duplicate_trades"] / daily["n_trades"]
-    daily["correction_report_share"] = daily["correction_report_trades"] / daily["n_trades"]
-
+    daily["institutional_trade_share"] = (
+        daily["institutional_price_trades"] / daily["n_trades"]
+    )
+    daily["potential_agency_duplicate_share"] = (
+        daily["potential_agency_duplicate_trades"] / daily["n_trades"]
+    )
+    daily["correction_report_share"] = (
+        daily["correction_report_trades"] / daily["n_trades"]
+    )
+    daily["ambiguous_reference_share"] = (
+        daily["ambiguous_reference_trades"] / daily["n_trades"]
+    )
     return daily
+
+
+def _valid_price_log_return(
+    df: pd.DataFrame,
+    price_col: str,
+    group_col: str = "cusip_id",
+) -> tuple[pd.Series, pd.Series]:
+    price = pd.to_numeric(df[price_col], errors="coerce")
+    log_price = np.log(price.where(price > 0))
+    result = pd.Series(np.nan, index=df.index, dtype="float64")
+    valid = log_price.notna()
+    if valid.any():
+        valid_frame = pd.DataFrame(
+            {
+                group_col: df.loc[valid, group_col].astype(str),
+                "_log_price": log_price.loc[valid],
+            },
+            index=df.index[valid],
+        )
+        result.loc[valid] = (
+            valid_frame.groupby(group_col, sort=False)["_log_price"].diff()
+        )
+    return log_price, result
 
 
 def add_bond_day_returns(bond_day: pd.DataFrame) -> pd.DataFrame:
@@ -894,11 +1356,16 @@ def add_bond_day_returns(bond_day: pd.DataFrame) -> pd.DataFrame:
         ("vwap_price", "vwap_return"),
         ("median_price", "median_price_return"),
         ("last_price", "last_price_return"),
+        ("reference_safe_vwap_price", "reference_safe_vwap_return"),
+        ("strict_status_vwap_price", "strict_status_vwap_return"),
     ]:
         if price_col in bond_day.columns:
             log_col = f"log_{price_col}"
-            bond_day[log_col] = np.log(bond_day[price_col].where(bond_day[price_col] > 0))
-            bond_day[return_col] = bond_day.groupby("cusip_id")[log_col].diff()
+            bond_day[log_col], bond_day[return_col] = _valid_price_log_return(
+                bond_day,
+                price_col=price_col,
+                group_col="cusip_id",
+            )
 
     if "median_yield" in bond_day.columns:
         bond_day["yield_change"] = bond_day.groupby("cusip_id")["median_yield"].diff()
@@ -973,11 +1440,245 @@ def write_parquet_summary(parquet_files: Iterable[Path]) -> None:
     print(summary_df)
     print(f"\nSaved summary to: {summary_path}")
 
+def build_global_message_reference_index(
+    parquet_files: Iterable[Path],
+) -> tuple[
+    set[tuple[str, str, pd.Timestamp]],
+    set[tuple[str, str, pd.Timestamp]],
+    pd.DataFrame,
+]:
+    parquet_files = list(parquet_files)
+    required = [
+        "cusip_id",
+        "trd_exctn_dt",
+        "msg_seq_nb",
+        "orig_msg_seq_nb",
+    ]
+
+    def read_reference_columns(path: Path) -> pd.DataFrame:
+        try:
+            out = pd.read_parquet(path, columns=required)
+        except Exception:
+            out = pd.read_parquet(path)
+            missing = [c for c in required if c not in out.columns]
+            if missing:
+                raise ValueError(
+                    f"{path.name} is missing message-reference fields: {missing}"
+                )
+            out = out[required].copy()
+
+        out["cusip_id"] = out["cusip_id"].astype(str).str.strip()
+        out["trd_exctn_dt"] = pd.to_datetime(
+            out["trd_exctn_dt"], errors="coerce"
+        ).dt.normalize()
+        out["msg_seq_nb"] = clean_id_series(out["msg_seq_nb"])
+        out["orig_msg_seq_nb"] = clean_id_series(out["orig_msg_seq_nb"])
+        return out
+
+    reference_parts: list[pd.DataFrame] = []
+    for path in parquet_files:
+        temp = read_reference_columns(path)
+        refs = temp.loc[
+            temp["cusip_id"].ne("")
+            & temp["trd_exctn_dt"].notna()
+            & temp["orig_msg_seq_nb"].notna(),
+            ["cusip_id", "orig_msg_seq_nb", "trd_exctn_dt"],
+        ].copy()
+        if refs.empty:
+            continue
+        refs = refs.rename(
+            columns={"trd_exctn_dt": "reference_execution_date"}
+        )
+        refs["_message_key"] = (
+            refs["cusip_id"] + "|" + refs["orig_msg_seq_nb"].astype(str)
+        )
+        refs["reference_file"] = path.name
+        reference_parts.append(refs)
+
+    if not reference_parts:
+        empty = pd.DataFrame(
+            columns=[
+                "cusip_id",
+                "orig_msg_seq_nb",
+                "reference_execution_date",
+                "original_execution_date",
+                "candidate_original_matches_on_date",
+                "reference_resolution",
+                "reference_file",
+            ]
+        )
+        return set(), set(), empty
+
+    refs_all = pd.concat(reference_parts, ignore_index=True)
+    referenced_message_keys = set(refs_all["_message_key"].unique())
+
+    message_count_parts: list[pd.DataFrame] = []
+    for path in parquet_files:
+        temp = read_reference_columns(path)
+        current = temp.loc[
+            temp["cusip_id"].ne("")
+            & temp["trd_exctn_dt"].notna()
+            & temp["msg_seq_nb"].notna(),
+            ["cusip_id", "msg_seq_nb", "trd_exctn_dt"],
+        ].copy()
+        if current.empty:
+            continue
+        current["_message_key"] = (
+            current["cusip_id"] + "|" + current["msg_seq_nb"].astype(str)
+        )
+        current = current.loc[
+            current["_message_key"].isin(referenced_message_keys)
+        ]
+        if current.empty:
+            continue
+        counts = (
+            current.groupby(["_message_key", "trd_exctn_dt"], dropna=False)
+            .size()
+            .rename("candidate_original_matches_on_date")
+            .reset_index()
+            .rename(columns={"trd_exctn_dt": "original_execution_date"})
+        )
+        message_count_parts.append(counts)
+
+    if message_count_parts:
+        message_date_counts = (
+            pd.concat(message_count_parts, ignore_index=True)
+            .groupby(["_message_key", "original_execution_date"], dropna=False)[
+                "candidate_original_matches_on_date"
+            ]
+            .sum()
+            .reset_index()
+        )
+    else:
+        message_date_counts = pd.DataFrame(
+            columns=[
+                "_message_key",
+                "original_execution_date",
+                "candidate_original_matches_on_date",
+            ]
+        )
+
+    if message_date_counts.empty:
+        matched = refs_all.copy()
+        matched["original_execution_date"] = pd.NaT
+        matched["candidate_original_matches_on_date"] = np.nan
+    else:
+
+        matched = refs_all.merge(
+            message_date_counts,
+            left_on=["_message_key", "reference_execution_date"],
+            right_on=["_message_key", "original_execution_date"],
+            how="left",
+            validate="many_to_one",
+        )
+
+    matched["reference_resolution"] = np.select(
+        [
+            matched["original_execution_date"].isna(),
+            matched["candidate_original_matches_on_date"].eq(1),
+            matched["candidate_original_matches_on_date"].gt(1),
+        ],
+        ["unresolved", "unique", "ambiguous"],
+        default="unresolved",
+    )
+
+    unique_keys = {
+        (
+            str(row.cusip_id),
+            str(row.orig_msg_seq_nb),
+            pd.Timestamp(row.original_execution_date).normalize(),
+        )
+        for row in matched.loc[
+            matched["reference_resolution"].eq("unique")
+        ].itertuples(index=False)
+    }
+    ambiguous_keys = {
+        (
+            str(row.cusip_id),
+            str(row.orig_msg_seq_nb),
+            pd.Timestamp(row.original_execution_date).normalize(),
+        )
+        for row in matched.loc[
+            matched["reference_resolution"].eq("ambiguous")
+        ].itertuples(index=False)
+    }
+
+    diagnostic_cols = [
+        "cusip_id",
+        "orig_msg_seq_nb",
+        "reference_execution_date",
+        "original_execution_date",
+        "candidate_original_matches_on_date",
+        "reference_resolution",
+        "reference_file",
+    ]
+    return unique_keys, ambiguous_keys, matched[diagnostic_cols].copy()
+
 
 def build_clean_bond_day(parquet_files: Iterable[Path]) -> pd.DataFrame:
+    parquet_files = list(parquet_files)
+    status_schema, status_policy, status_schema_audit = (
+        detect_trace_status_policy(parquet_files)
+    )
+    print(f"Detected TRACE status schema: {status_schema}")
+
+    (
+        unique_reference_keys,
+        ambiguous_reference_keys,
+        reference_diagnostics,
+    ) = build_global_message_reference_index(parquet_files)
+
+    reference_path = (
+        TRACE_CLEANING_DIAG_DIR / "trace_message_reference_resolution.csv"
+    )
+    reference_diagnostics.to_csv(reference_path, index=False)
+    reference_summary_path = (
+        TRACE_CLEANING_DIAG_DIR / "trace_message_reference_summary.csv"
+    )
+    if not reference_diagnostics.empty:
+        print("\nTRACE message-reference resolution:")
+        resolution_counts = (
+            reference_diagnostics["reference_resolution"]
+            .value_counts(dropna=False)
+        )
+        print(resolution_counts)
+        resolved = reference_diagnostics["reference_resolution"].isin(
+            ["unique", "ambiguous"]
+        )
+        nonexact_resolved = int(
+            (
+                resolved
+                & reference_diagnostics["original_execution_date"].notna()
+                & reference_diagnostics["reference_execution_date"].notna()
+                & reference_diagnostics["original_execution_date"].ne(
+                    reference_diagnostics["reference_execution_date"]
+                )
+            ).sum()
+        )
+        summary_rows = [
+            {
+                "reference_resolution": str(label),
+                "rows": int(count),
+                "nonexact_resolved_matches": nonexact_resolved,
+            }
+            for label, count in resolution_counts.items()
+        ]
+        pd.DataFrame(summary_rows).to_csv(reference_summary_path, index=False)
+    else:
+        pd.DataFrame(
+            columns=[
+                "reference_resolution",
+                "rows",
+                "nonexact_resolved_matches",
+            ]
+        ).to_csv(reference_summary_path, index=False)
+    print(f"Saved message-reference audit to: {reference_path}")
+    print(f"Saved message-reference summary to: {reference_summary_path}")
+
     daily_parts = []
     waterfalls = []
     mappings = []
+    status_cross_tabs = []
     flag_summaries = []
     volume_audit_summaries = []
     volume_round_tables = []
@@ -985,24 +1686,69 @@ def build_clean_bond_day(parquet_files: Iterable[Path]) -> pd.DataFrame:
 
     for file in parquet_files:
         print(f"\nCleaning and aggregating to bond-day: {file.name}")
-        cleaned_path = TRACE_CLEANED_TRADE_DIR / f"{file.stem}_cleaned_trades.parquet"
+        cleaned_path = (
+            TRACE_CLEANED_TRADE_DIR
+            / f"{file.stem}_cleaned_trades.parquet"
+        )
 
-        if cleaned_path.exists() and not FORCE_REBUILD_CLEANED_TRADES:
-            print(f"Loading existing cleaned trades: {cleaned_path}")
-            df = pd.read_parquet(cleaned_path)
-            waterfall = build_trade_cleaning_waterfall(df, file.name)
-            mapping = classify_status_values(df)
-            if not mapping.empty:
-                mapping.insert(0, "file", file.name)
-        else:
+        rebuild_cleaned = FORCE_REBUILD_CLEANED_TRADES or not cleaned_path.exists()
+        if cleaned_path.exists() and not rebuild_cleaned:
+            cached = pd.read_parquet(cleaned_path)
+            schema_ok = (
+                "_cleaner_schema_version" in cached.columns
+                and cached["_cleaner_schema_version"]
+                .astype(str)
+                .eq(TRACE_CLEANER_SCHEMA_VERSION)
+                .all()
+            )
+            required_flags = {
+                "basic_valid_price_trade",
+                "clean_yield_sample",
+                "clean_price_reference_safe_sample",
+                "clean_price_strict_status_sample",
+                "_trace_status_schema",
+            }
+            schema_ok &= required_flags.issubset(cached.columns)
+            if "_trace_status_schema" in cached.columns:
+                schema_ok &= cached["_trace_status_schema"].astype(str).eq(
+                    status_schema
+                ).all()
+            if schema_ok:
+                print(f"Loading existing cleaned trades: {cleaned_path}")
+                df = cached
+                waterfall = build_trade_cleaning_waterfall(df, file.name)
+                mapping = classify_status_values(df, status_policy=status_policy)
+                if not mapping.empty:
+                    mapping.insert(0, "file", file.name)
+            else:
+                print(
+                    "Cached cleaned trades use an older schema; rebuilding "
+                    f"{cleaned_path.name}."
+                )
+                rebuild_cleaned = True
+
+        if rebuild_cleaned:
             df = pd.read_parquet(file)
             df = clean_trade_chunk(df)
-            df, waterfall, mapping = apply_trace_cleaner(df, file_name=file.name)
+            df, waterfall, mapping = apply_trace_cleaner(
+                df,
+                unique_reference_keys=unique_reference_keys,
+                ambiguous_reference_keys=ambiguous_reference_keys,
+                status_policy=status_policy,
+                status_schema=status_schema,
+                file_name=file.name,
+            )
             df.to_parquet(cleaned_path, index=False)
             print(f"Saved cleaned trade-level file: {cleaned_path}")
 
-        volume_col = pick_col(df, ["entrd_vol_qt", "ascii_rptd_vol_tx", "rptd_vol_qt"])
+        status_cross = build_status_cross_tab(df, file_name=file.name)
+        if not status_cross.empty:
+            status_cross_tabs.append(status_cross)
 
+        volume_col = pick_col(
+            df,
+            ["entrd_vol_qt", "ascii_rptd_vol_tx", "rptd_vol_qt"],
+        )
         if volume_col:
             vol_summary, vol_round, vol_hist = audit_trace_volume_bunching(
                 df=df,
@@ -1012,7 +1758,6 @@ def build_clean_bond_day(parquet_files: Iterable[Path]) -> pd.DataFrame:
             )
             volume_audit_summaries.append(vol_summary)
             volume_round_tables.append(vol_round)
-
             if vol_hist is not None and len(vol_hist) > 0:
                 volume_hist_parts.append(vol_hist)
 
@@ -1021,35 +1766,91 @@ def build_clean_bond_day(parquet_files: Iterable[Path]) -> pd.DataFrame:
             mappings.append(mapping)
 
         flag_cols = [
-            "is_cancel_report", "is_correction_report", "is_reversal_report",
-            "is_referenced_original", "is_exact_duplicate", "is_special_condition",
-            "is_potential_agency_duplicate", "clean_price_sample", "clean_volume_sample",
-            "clean_institutional_price_sample", "clean_price_no_agency_sample",
+            "is_cancel_report",
+            "is_correction_report",
+            "is_reversal_report",
+            "is_referenced_original_unique",
+            "is_referenced_original_ambiguous",
+            "reference_target_resolved_unique",
+            "reference_target_resolved_ambiguous",
+            "is_usable_trade_message",
+            "is_exact_duplicate",
+            "is_special_condition",
+            "is_potential_agency_duplicate",
+            "clean_price_sample",
+            "clean_yield_sample",
+            "clean_price_reference_safe_sample",
+            "clean_price_strict_status_sample",
+            "clean_volume_sample",
+            "clean_institutional_price_sample",
+            "clean_price_no_agency_sample",
         ]
-        flag_summaries.append(
-            {
-                "file": file.name,
-                "rows": len(df),
-                **{col: int(df[col].sum()) for col in flag_cols if col in df.columns},
-            }
-        )
+        flag_summary = {
+            "file": file.name,
+            "rows": len(df),
+            **{
+                col: int(df[col].fillna(False).sum())
+                for col in flag_cols
+                if col in df.columns
+            },
+        }
+        if {"clean_price_sample", "is_cancel_report"}.issubset(df.columns):
+            flag_summary["clean_price_cancel_rows"] = int(
+                (df["clean_price_sample"].fillna(False)
+                 & df["is_cancel_report"].fillna(False)).sum()
+            )
+        if {"clean_price_sample", "is_correction_report"}.issubset(df.columns):
+            flag_summary["clean_price_correction_rows"] = int(
+                (df["clean_price_sample"].fillna(False)
+                 & df["is_correction_report"].fillna(False)).sum()
+            )
+        if {
+            "clean_price_sample",
+            "is_correction_report",
+            "reference_target_resolved_unique",
+        }.issubset(df.columns):
+            flag_summary["clean_price_unresolved_correction_rows"] = int(
+                (
+                    df["clean_price_sample"].fillna(False)
+                    & df["is_correction_report"].fillna(False)
+                    & ~df["reference_target_resolved_unique"].fillna(False)
+                ).sum()
+            )
+        if {"clean_price_sample", "is_regular_status"}.issubset(df.columns):
+            flag_summary["clean_price_regular_rows"] = int(
+                (df["clean_price_sample"].fillna(False)
+                 & df["is_regular_status"].fillna(False)).sum()
+            )
+        flag_summaries.append(flag_summary)
 
         daily = aggregate_cleaned_year(df, file.name)
         if not daily.empty:
             daily_parts.append(daily)
 
     if not daily_parts:
-        raise ValueError("No daily bond observations were created from clean price sample.")
+        raise ValueError(
+            "No daily bond observations were created from clean price sample."
+        )
 
-    trade_waterfall = pd.concat(waterfalls, ignore_index=True)
-    trade_waterfall.to_csv(TRACE_CLEANING_DIAG_DIR / "trace_trade_cleaning_waterfall_by_year.csv", index=False)
-
+    pd.concat(waterfalls, ignore_index=True).to_csv(
+        TRACE_CLEANING_DIAG_DIR
+        / "trace_trade_cleaning_waterfall_by_year.csv",
+        index=False,
+    )
     if mappings:
-        status_mapping = pd.concat(mappings, ignore_index=True)
-        status_mapping.to_csv(TRACE_CLEANING_DIAG_DIR / "trace_status_action_mapping.csv", index=False)
-
-    flag_summary = pd.DataFrame(flag_summaries)
-    flag_summary.to_csv(TRACE_CLEANING_DIAG_DIR / "trace_cleaning_flags_summary.csv", index=False)
+        pd.concat(mappings, ignore_index=True).to_csv(
+            TRACE_CLEANING_DIAG_DIR / "trace_status_action_mapping.csv",
+            index=False,
+        )
+    if status_cross_tabs:
+        pd.concat(status_cross_tabs, ignore_index=True).to_csv(
+            TRACE_CLEANING_DIAG_DIR / "trace_status_format_crosstab.csv",
+            index=False,
+        )
+    pd.DataFrame(flag_summaries).to_csv(
+        TRACE_CLEANING_DIAG_DIR / "trace_cleaning_flags_summary.csv",
+        index=False,
+    )
 
     write_trace_volume_bunching_outputs(
         summary_parts=volume_audit_summaries,
@@ -1065,17 +1866,13 @@ def build_clean_bond_day(parquet_files: Iterable[Path]) -> pd.DataFrame:
     weekend_mask = bond_day["date"].dt.weekday >= 5
     print("Weekend bond-day rows removed:", int(weekend_mask.sum()))
     bond_day = bond_day.loc[~weekend_mask].copy()
-
     bond_day = add_bond_day_returns(bond_day)
-
-    bond_day_path = BOND_DAY_DIR / "trace_banks_bond_day.parquet"
-    bond_day.to_parquet(bond_day_path, index=False)
+    bond_day.to_parquet(TRACE_BOND_DAY_FULL_PATH, index=False)
 
     print("\nBOND-DAY DATASET:")
     print(bond_day.shape)
     print(bond_day.head())
-    print(f"\nSaved bond-day dataset to: {bond_day_path}")
-
+    print(f"\nSaved bond-day dataset to: {TRACE_BOND_DAY_FULL_PATH}")
     return bond_day
 
 
@@ -1110,25 +1907,105 @@ def write_bond_day_diagnostics(bond_day: pd.DataFrame) -> pd.DataFrame:
     bond_day["cusip_id"].dropna().astype(str).drop_duplicates().sort_values().to_csv(cusip_path, index=False, header=False)
     print(f"Saved CUSIP list to: {cusip_path}")
 
-    liquid_cusips = liq_summary.loc[
-        (liq_summary["active_days"] >= MIN_ACTIVE_DAYS)
-        & (liq_summary["total_trades"] >= MIN_TOTAL_TRADES),
-        "cusip_id",
-    ]
-    bond_day_liquid = bond_day[bond_day["cusip_id"].isin(liquid_cusips)].copy()
+    liquid_cusips_expost = set(
+        liq_summary.loc[
+            liq_summary["active_days"].ge(MIN_ACTIVE_DAYS)
+            & liq_summary["total_trades"].ge(MIN_TOTAL_TRADES),
+            "cusip_id",
+        ]
+    )
+    bond_day_liquid_expost = bond_day.loc[
+        bond_day["cusip_id"].isin(liquid_cusips_expost)
+    ].copy()
+    bond_day_liquid_expost.to_parquet(
+        TRACE_BOND_DAY_LIQUID_EXPOST_PATH,
+        index=False,
+    )
+
+    train_activity = (
+        bond_day.loc[bond_day["date"] < pd.Timestamp(TRAIN_END_DATE)]
+        .groupby("cusip_id")
+        .agg(
+            active_days_train=("date", "nunique"),
+            total_trades_train=("n_trades", "sum"),
+        )
+        .reset_index()
+    )
+    liquid_cusips_train = set(
+        train_activity.loc[
+            train_activity["active_days_train"].ge(MIN_ACTIVE_DAYS)
+            & train_activity["total_trades_train"].ge(MIN_TOTAL_TRADES),
+            "cusip_id",
+        ]
+    )
+    bond_day_liquid_train = bond_day.loc[
+        bond_day["cusip_id"].isin(liquid_cusips_train)
+    ].copy()
+
+    point_in_time = bond_day.sort_values(["cusip_id", "date"]).copy()
+    point_in_time["prior_active_days"] = point_in_time.groupby("cusip_id").cumcount()
+    point_in_time["prior_trade_reports"] = (
+        point_in_time.groupby("cusip_id")["n_trades"].cumsum()
+        - point_in_time["n_trades"]
+    )
+    point_in_time["eligible_point_in_time"] = (
+        point_in_time["prior_active_days"].ge(MIN_ACTIVE_DAYS)
+        & point_in_time["prior_trade_reports"].ge(MIN_TOTAL_TRADES)
+    )
+    bond_day_liquid_point_in_time = point_in_time.loc[
+        point_in_time["eligible_point_in_time"]
+    ].copy()
+    bond_day_liquid_point_in_time.to_parquet(
+        TRACE_BOND_DAY_LIQUID_POINT_IN_TIME_PATH,
+        index=False,
+    )
+
+    universe_map = {
+        "train_frozen": bond_day_liquid_train,
+        "point_in_time": bond_day_liquid_point_in_time,
+        "expost": bond_day_liquid_expost,
+    }
+    if LIQUID_UNIVERSE_MODE not in universe_map:
+        raise ValueError(
+            f"Unknown LIQUID_UNIVERSE_MODE={LIQUID_UNIVERSE_MODE!r}. "
+            f"Choose from {sorted(universe_map)}."
+        )
+    bond_day_liquid = universe_map[LIQUID_UNIVERSE_MODE].copy()
 
     liquid_path = BOND_DAY_DIR / "trace_banks_bond_day_liquid.parquet"
     bond_day_liquid.to_parquet(liquid_path, index=False)
 
     liquid_cusip_path = PROCESSED_DIR / "bank_liquid_cusips.txt"
     bond_day_liquid["cusip_id"].dropna().astype(str).drop_duplicates().sort_values().to_csv(
-        liquid_cusip_path, index=False, header=False
+        liquid_cusip_path,
+        index=False,
+        header=False,
+    )
+
+    universe_summary = pd.DataFrame(
+        [
+            {
+                "universe": name,
+                "selected_as_main": name == LIQUID_UNIVERSE_MODE,
+                "rows": len(frame),
+                "cusips": frame["cusip_id"].nunique(),
+                "first_date": frame["date"].min(),
+                "last_date": frame["date"].max(),
+            }
+            for name, frame in universe_map.items()
+        ]
+    )
+    universe_summary.to_csv(
+        PROCESSED_DIR / "bond_activity_universe_comparison.csv",
+        index=False,
     )
 
     print("\nLIQUID BOND-DAY DATASET:")
+    print("Selected universe:", LIQUID_UNIVERSE_MODE)
     print(bond_day_liquid.shape)
     print(f"Number of liquid CUSIPs: {bond_day_liquid['cusip_id'].nunique()}")
-    print(f"Saved liquid dataset to: {liquid_path}")
+    print(f"Saved selected liquid dataset to: {liquid_path}")
+    print(universe_summary)
 
     daily_market_activity = (
         bond_day.groupby("date")
@@ -1158,6 +2035,82 @@ def write_bond_day_diagnostics(bond_day: pd.DataFrame) -> pd.DataFrame:
     issuer_year.to_csv(PROCESSED_DIR / "issuer_year_coverage.csv", index=False)
 
     return bond_day_liquid
+
+
+
+def interval_join_latest_active(
+    left_group: pd.DataFrame,
+    right_group: pd.DataFrame,
+    *,
+    left_date_col: str = "date",
+    start_col: str = "stdt_effective",
+    end_col: str = "enddt_effective",
+    chunk_size: int = 5000,
+) -> pd.DataFrame:
+    left = left_group.sort_values(left_date_col).reset_index(drop=True).copy()
+    right = right_group.sort_values(start_col).reset_index(drop=True).copy()
+    right_cols = list(right.columns)
+
+    n_left = len(left)
+    if right.empty:
+        for col in right_cols:
+            left[col] = pd.NaT if pd.api.types.is_datetime64_any_dtype(right[col]) else np.nan
+        left["master_active_match_count"] = 0
+        left["master_multiple_active_match"] = False
+        left["master_fallback_to_earlier_active_interval"] = False
+        return left
+
+    left_dates = pd.to_datetime(left[left_date_col], errors="coerce").values.astype("datetime64[ns]")
+    starts = pd.to_datetime(right[start_col], errors="coerce").values.astype("datetime64[ns]")
+    ends = pd.to_datetime(right[end_col], errors="coerce").values.astype("datetime64[ns]")
+
+    selected = np.full(n_left, -1, dtype=np.int64)
+    match_count = np.zeros(n_left, dtype=np.int32)
+
+    for lo in range(0, n_left, chunk_size):
+        hi = min(lo + chunk_size, n_left)
+        dates_chunk = left_dates[lo:hi]
+        valid_dates = ~pd.isna(dates_chunk)
+        if not valid_dates.any():
+            continue
+
+        active = (
+            (starts[:, None] <= dates_chunk[None, :])
+            & (ends[:, None] >= dates_chunk[None, :])
+            & valid_dates[None, :]
+        )
+        counts = active.sum(axis=0).astype(np.int32)
+        match_count[lo:hi] = counts
+
+        has_match = counts > 0
+        if has_match.any():
+
+            reverse_position = np.argmax(active[::-1, :], axis=0)
+            chosen = len(right) - 1 - reverse_position
+            chosen[~has_match] = -1
+            selected[lo:hi] = chosen
+
+    has_match = selected >= 0
+    safe_take = np.where(has_match, selected, 0)
+    picked = right.iloc[safe_take].reset_index(drop=True).copy()
+    for col in right_cols:
+        if pd.api.types.is_datetime64_any_dtype(picked[col]):
+            picked.loc[~has_match, col] = pd.NaT
+        else:
+            picked.loc[~has_match, col] = np.nan
+
+    naive_idx = np.searchsorted(starts, left_dates, side="right") - 1
+    naive_has_candidate = naive_idx >= 0
+    naive_active = np.zeros(n_left, dtype=bool)
+    valid_naive = naive_has_candidate & ~pd.isna(left_dates)
+    naive_active[valid_naive] = ends[naive_idx[valid_naive]] >= left_dates[valid_naive]
+    fallback = has_match & ~naive_active
+
+    out = pd.concat([left, picked], axis=1)
+    out["master_active_match_count"] = match_count
+    out["master_multiple_active_match"] = match_count > 1
+    out["master_fallback_to_earlier_active_interval"] = fallback
+    return out
 
 
 def build_final_panel_with_master() -> pd.DataFrame:
@@ -1269,39 +2222,82 @@ def build_final_panel_with_master() -> pd.DataFrame:
     master_data_cols = [col for col in master_pit.columns if col != "cusip_id"]
     merged_parts = []
 
-    print("\nRunning point-in-time merge by CUSIP...")
+    print("\nRunning point-in-time interval merge by CUSIP...")
     for cusip, left_group in bond_day_liquid.groupby("cusip_id", sort=False):
         right_group = master_pit.loc[master_pit["cusip_id"] == cusip].copy()
-        left_group = left_group.sort_values("date").copy()
-
-        if right_group.empty:
-            temp = left_group.copy()
-            for col in master_data_cols:
-                temp[col] = np.nan
-        else:
-            right_group = right_group.drop(columns=["cusip_id"]).sort_values("stdt_effective").copy()
-            temp = pd.merge_asof(
-                left_group,
-                right_group,
-                left_on="date",
-                right_on="stdt_effective",
-                direction="backward",
-            )
+        if not right_group.empty:
+            right_group = right_group.drop(columns=["cusip_id"]).copy()
+        temp = interval_join_latest_active(
+            left_group,
+            right_group,
+            left_date_col="date",
+            start_col="stdt_effective",
+            end_col="enddt_effective",
+        )
         merged_parts.append(temp)
 
     bond_day_with_master = pd.concat(merged_parts, ignore_index=True)
 
-    valid_master_row = (
-        bond_day_with_master["stdt_effective"].notna()
-        & (bond_day_with_master["date"] <= bond_day_with_master["enddt_effective"])
+    valid_master_row = bond_day_with_master["master_active_match_count"].gt(0)
+    multiple_active = bond_day_with_master["master_multiple_active_match"].fillna(False)
+    fallback_active = bond_day_with_master[
+        "master_fallback_to_earlier_active_interval"
+    ].fillna(False)
+
+    match_summary = pd.DataFrame(
+        [
+            {
+                "rows": int(len(bond_day_with_master)),
+                "rows_without_active_master_match": int((~valid_master_row).sum()),
+                "share_without_active_master_match": float((~valid_master_row).mean()),
+                "rows_with_one_active_master_match": int(
+                    bond_day_with_master["master_active_match_count"].eq(1).sum()
+                ),
+                "rows_with_multiple_active_master_matches": int(multiple_active.sum()),
+                "rows_falling_back_to_earlier_active_interval": int(
+                    fallback_active.sum()
+                ),
+                "max_active_master_matches": int(
+                    bond_day_with_master["master_active_match_count"].max()
+                ),
+            }
+        ]
     )
+    match_summary_path = DIAG_DIR / "master_pit_active_match_summary.csv"
+    match_summary.to_csv(match_summary_path, index=False)
+
+    affected_cols = [
+        col
+        for col in [
+            "cusip_id",
+            "date",
+            "trace_company_symbol",
+            "master_active_match_count",
+            "master_multiple_active_match",
+            "master_fallback_to_earlier_active_interval",
+            "stdt_effective",
+            "enddt_effective",
+            maturity_col,
+            coupon_col,
+            coupon_type_col,
+            debt_type_col,
+            security_type_col,
+            security_subtype_col,
+        ]
+        if col and col in bond_day_with_master.columns
+    ]
+    bond_day_with_master.loc[
+        multiple_active | fallback_active,
+        affected_cols,
+    ].to_csv(
+        DIAG_DIR / "master_pit_affected_bond_dates.csv",
+        index=False,
+    )
+
     print("\nPOINT-IN-TIME MERGE DIAGNOSTICS:")
     print("Merged panel shape:", bond_day_with_master.shape)
-    print("Rows without valid point-in-time master row:", int((~valid_master_row).sum()))
-    print("Share without valid point-in-time master row:", float((~valid_master_row).mean()))
-
-    for col in master_data_cols:
-        bond_day_with_master.loc[~valid_master_row, col] = np.nan
+    print(match_summary.to_string(index=False))
+    print(f"Saved active-match summary to: {match_summary_path}")
 
     if maturity_col and maturity_col in bond_day_with_master.columns:
         bond_day_with_master[maturity_col] = pd.to_datetime(bond_day_with_master[maturity_col], errors="coerce")
@@ -1450,11 +2446,22 @@ def apply_final_bond_filters(
         ("vwap_price", "final_vwap_return"),
         ("median_price", "final_median_price_return"),
         ("last_price", "final_last_price_return"),
+        (
+            "reference_safe_vwap_price",
+            "final_reference_safe_vwap_return",
+        ),
+        (
+            "strict_status_vwap_price",
+            "final_strict_status_vwap_return",
+        ),
     ]:
         if price_col in final_panel.columns:
             log_col = f"final_log_{price_col}"
-            final_panel[log_col] = np.log(final_panel[price_col].where(final_panel[price_col] > 0))
-            final_panel[return_col] = final_panel.groupby("cusip_id")[log_col].diff()
+            final_panel[log_col], final_panel[return_col] = _valid_price_log_return(
+                final_panel,
+                price_col=price_col,
+                group_col="cusip_id",
+            )
 
     if (
         coupon_col
@@ -2355,6 +3362,7 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
             TRACE_MODEL_READY_DIRTY_PATH,
             index=False,
         )
+
     gap_summary_rows = []
 
     for gap in GAP_THRESHOLDS:
@@ -2369,6 +3377,8 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
             yield_change_col,
             "final_median_price_return",
             "final_last_price_return",
+            "final_reference_safe_vwap_return",
+            "final_strict_status_vwap_return",
         ]:
             if col and col in gap_panel.columns:
                 lo = gap_panel[col].quantile(0.005)
@@ -2429,6 +3439,8 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
         yield_change_col,
         "final_median_price_return",
         "final_last_price_return",
+        "final_reference_safe_vwap_return",
+        "final_strict_status_vwap_return",
     ]:
         if col and col in baseline_panel.columns:
             lo = baseline_panel[col].quantile(0.005)

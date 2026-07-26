@@ -16,8 +16,12 @@ from config_institutional import (
     FIGURES_DIR,
     GAP_THRESHOLDS,
     MODEL_READY_MAX_BUSINESS_GAP,
+    TRACE_HOLIDAY_PATH,
     ensure_directories,
 )
+
+from calendar_utils import load_market_holidays
+from panel_integrity_audit import assert_point_in_time_maturity_bucket
 
 
 GROUP_COL = "cusip_id"
@@ -70,15 +74,17 @@ PEER_BASE_NAMES = [
 PEER_VARIANTS = ["raw", "resid_rates", "resid_standard"]
 MODEL_PEER_VARIANTS = ["raw"]
 DIAGNOSTIC_PEER_VARIANTS = PEER_VARIANTS
-
 MAX_DESIGN_DIAGNOSTIC_ROWS = 200_000
 RANDOM_SEED = 42
-
 MAX_PEER_PRICE_STALENESS_BD = 5
 MIN_PEERS = 3
-
 MATURITY_BINS = [1, 3, 5, 7, 10, 15, 30, np.inf]
 MATURITY_LABELS = ["1-3y", "3-5y", "5-7y", "7-10y", "10-15y", "15-30y", "30y+"]
+
+TRACE_BUSINESS_CALENDAR = load_market_holidays(
+    TRACE_HOLIDAY_PATH,
+    calendar_name="TRACE OTC / SIFMA",
+)
 
 
 def choose_target(panel: pd.DataFrame) -> str:
@@ -145,41 +151,115 @@ def prepare_panel(panel: pd.DataFrame) -> pd.DataFrame:
     return panel
 
 
-def add_static_peer_metadata(panel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def add_point_in_time_peer_metadata(
+    panel: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     panel = panel.copy()
 
-    if "years_to_maturity" not in panel.columns:
-        raise ValueError("years_to_maturity is required to form maturity peer buckets.")
-
-    required = [GROUP_COL, ISSUER_COL, "years_to_maturity"]
+    required = [GROUP_COL, DATE_COL, ISSUER_COL, "years_to_maturity"]
     missing = [c for c in required if c not in panel.columns]
     if missing:
         raise ValueError(f"Missing required columns for peer metadata: {missing}")
 
-    meta = (
-        panel.dropna(subset=[GROUP_COL, ISSUER_COL, "years_to_maturity"])
-        .groupby(GROUP_COL)
-        .agg(
-            peer_issuer=(ISSUER_COL, lambda x: x.dropna().mode().iloc[0] if not x.dropna().mode().empty else x.dropna().iloc[0]),
-            median_years_to_maturity=("years_to_maturity", "median"),
-            n_obs_for_peer_meta=(DATE_COL, "size"),
-        )
-        .reset_index()
+    maturity_col = next(
+        (
+            col
+            for col in ["mtrty_dt", "maturity_dt", "maturity_date"]
+            if col in panel.columns
+        ),
+        None,
     )
 
-    meta["peer_maturity_bucket"] = pd.cut(
-        meta["median_years_to_maturity"],
+    if maturity_col is not None:
+        contractual_maturity = pd.to_datetime(panel[maturity_col], errors="coerce")
+    else:
+        remaining_days = (
+            pd.to_numeric(panel["years_to_maturity"], errors="coerce")
+            * 365.25
+        ).round()
+        contractual_maturity = (
+            pd.to_datetime(panel[DATE_COL], errors="coerce")
+            + pd.to_timedelta(remaining_days, unit="D")
+        )
+
+    panel["peer_contractual_maturity_date"] = contractual_maturity
+    panel["peer_issuer"] = (
+        panel[ISSUER_COL]
+        .astype("string")
+        .str.upper()
+        .str.strip()
+    )
+    panel["peer_maturity_bucket"] = pd.cut(
+        pd.to_numeric(panel["years_to_maturity"], errors="coerce"),
         bins=MATURITY_BINS,
         labels=MATURITY_LABELS,
         right=False,
-    ).astype(str)
+    ).astype("string")
 
-    meta.loc[meta["peer_maturity_bucket"].eq("nan"), "peer_maturity_bucket"] = np.nan
+    panel["peer_legal_issuer_id"] = (
+        panel[GROUP_COL].astype(str).str.strip().str[:6]
+    )
 
-    panel = panel.merge(
-        meta[[GROUP_COL, "peer_issuer", "peer_maturity_bucket"]],
-        on=GROUP_COL,
-        how="left",
+    structure_candidates = [
+        ["debt_type_cd"],
+        ["scrty_sbtp_cd", "scrty_sbtyp_cd"],
+        ["callable_flg", "callable", "call_ind"],
+    ]
+    structure_cols = []
+    for candidates in structure_candidates:
+        selected = next((c for c in candidates if c in panel.columns), None)
+        if selected is not None:
+            structure_cols.append(selected)
+
+    if structure_cols:
+        structure_parts = []
+        for col in structure_cols:
+            values = (
+                panel[col]
+                .astype("string")
+                .str.upper()
+                .str.strip()
+                .replace({"": pd.NA, "NAN": pd.NA, "<NA>": pd.NA})
+            )
+            structure_parts.append(values.rename(col))
+        structure_frame = pd.concat(structure_parts, axis=1)
+        complete_structure = structure_frame.notna().all(axis=1)
+        panel["peer_structure_key"] = structure_frame.fillna("").agg("|".join, axis=1)
+        panel.loc[~complete_structure, "peer_structure_key"] = pd.NA
+        panel["peer_structure_fields"] = ",".join(structure_cols)
+    else:
+        panel["peer_structure_key"] = pd.NA
+        panel["peer_structure_fields"] = ""
+
+    def modal_value(x: pd.Series):
+        clean = x.dropna()
+        if clean.empty:
+            return np.nan
+        mode = clean.mode()
+        return mode.iloc[0] if not mode.empty else clean.iloc[0]
+
+    meta = (
+        panel.groupby(GROUP_COL, dropna=False)
+        .agg(
+            peer_issuer=("peer_issuer", modal_value),
+            first_observed_maturity_date=(
+                "peer_contractual_maturity_date",
+                "first",
+            ),
+            last_observed_maturity_date=(
+                "peer_contractual_maturity_date",
+                "last",
+            ),
+            n_unique_observed_maturity_dates=(
+                "peer_contractual_maturity_date",
+                "nunique",
+            ),
+            peer_legal_issuer_id=("peer_legal_issuer_id", modal_value),
+            peer_structure_key=("peer_structure_key", modal_value),
+            peer_structure_fields=("peer_structure_fields", modal_value),
+            n_obs_for_peer_meta=(DATE_COL, "size"),
+        )
+        .reset_index()
     )
 
     return panel, meta
@@ -224,6 +304,7 @@ def fit_fe_model(
     target: str,
     group_col: str = GROUP_COL,
 ) -> dict:
+
     train = train.copy()
     test = test.copy()
 
@@ -327,74 +408,233 @@ def predict_fe_model(
 
     return alpha + X.to_numpy() @ beta
 
-
 def _build_price_and_age_matrices(
     panel: pd.DataFrame,
     log_price_col: str,
-) -> tuple[np.ndarray, np.ndarray, list[pd.Timestamp], list[str], dict[pd.Timestamp, int], dict[str, int]]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    list[pd.Timestamp],
+    list[str],
+    dict[pd.Timestamp, int],
+    dict[str, int],
+]:
     cols = [GROUP_COL, DATE_COL, log_price_col]
-    px = panel[cols].dropna(subset=[GROUP_COL, DATE_COL, log_price_col]).copy()
+    px = panel[cols].dropna(subset=cols).copy()
     px = px.sort_values([DATE_COL, GROUP_COL])
     px = px.drop_duplicates([DATE_COL, GROUP_COL], keep="last")
 
-    price_wide = px.pivot(index=DATE_COL, columns=GROUP_COL, values=log_price_col).sort_index()
-    all_dates = list(price_wide.index)
-    all_cusips = list(price_wide.columns)
+    price_wide = (
+        px.pivot(index=DATE_COL, columns=GROUP_COL, values=log_price_col)
+        .sort_index()
+    )
+    all_dates = [pd.Timestamp(x) for x in price_wide.index]
+    all_cusips = [str(x) for x in price_wide.columns]
 
     raw_price = price_wide.to_numpy(dtype=float)
     observed = np.isfinite(raw_price)
 
-    date_index = np.arange(len(all_dates), dtype=float)[:, None]
-    obs_date_index = np.where(observed, date_index, np.nan)
+    dates_np = np.asarray(all_dates, dtype="datetime64[D]")
+    anchor = dates_np.min()
+    date_ordinals = np.busday_count(
+        anchor,
+        dates_np,
+        busdaycal=TRACE_BUSINESS_CALENDAR,
+    ).astype(float)
 
-    log_price_ffill = pd.DataFrame(raw_price, index=all_dates, columns=all_cusips).ffill().to_numpy(dtype=float)
-    obs_index_ffill = pd.DataFrame(obs_date_index, index=all_dates, columns=all_cusips).ffill().to_numpy(dtype=float)
+    observed_ordinals = np.where(
+        observed,
+        date_ordinals[:, None],
+        np.nan,
+    )
+
+    log_price_ffill = (
+        pd.DataFrame(raw_price, index=all_dates, columns=all_cusips)
+        .ffill()
+        .to_numpy(dtype=float)
+    )
+    obs_ordinal_ffill = (
+        pd.DataFrame(observed_ordinals, index=all_dates, columns=all_cusips)
+        .ffill()
+        .to_numpy(dtype=float)
+    )
 
     date_to_idx = {pd.Timestamp(d): i for i, d in enumerate(all_dates)}
-    cusip_to_col = {c: j for j, c in enumerate(all_cusips)}
+    cusip_to_col = {str(c): j for j, c in enumerate(all_cusips)}
 
-    return log_price_ffill, obs_index_ffill, all_dates, all_cusips, date_to_idx, cusip_to_col
+    return (
+        log_price_ffill,
+        obs_ordinal_ffill,
+        date_ordinals,
+        all_dates,
+        all_cusips,
+        date_to_idx,
+        cusip_to_col,
+    )
 
 
-def _asof_date_index(date_to_idx: dict[pd.Timestamp, int], dates: list[pd.Timestamp], value: pd.Timestamp) -> int | None:
+def _asof_date_index(
+    date_to_idx: dict[pd.Timestamp, int],
+    dates: list[pd.Timestamp],
+    value: pd.Timestamp,
+) -> int | None:
     value = pd.Timestamp(value)
-
     if value in date_to_idx:
         return date_to_idx[value]
 
-    pos = np.searchsorted(np.array(dates, dtype="datetime64[ns]"), np.datetime64(value), side="right") - 1
-    if pos < 0:
-        return None
-    return int(pos)
+    pos = (
+        np.searchsorted(
+            np.asarray(dates, dtype="datetime64[ns]"),
+            np.datetime64(value),
+            side="right",
+        )
+        - 1
+    )
+    return None if pos < 0 else int(pos)
+
+
+def _build_maturity_date_matrix(
+    panel: pd.DataFrame,
+    all_dates: list[pd.Timestamp],
+    all_cusips: list[str],
+) -> np.ndarray:
+    required = [GROUP_COL, DATE_COL, "peer_contractual_maturity_date"]
+    missing = [c for c in required if c not in panel.columns]
+    if missing:
+        raise ValueError(f"Missing maturity-matrix columns: {missing}")
+
+    temp = panel[required].copy()
+    temp["peer_contractual_maturity_date"] = pd.to_datetime(
+        temp["peer_contractual_maturity_date"],
+        errors="coerce",
+    )
+    temp = (
+        temp.dropna(subset=required)
+        .sort_values([DATE_COL, GROUP_COL])
+        .drop_duplicates([DATE_COL, GROUP_COL], keep="last")
+    )
+
+    wide = (
+        temp.pivot(
+            index=DATE_COL,
+            columns=GROUP_COL,
+            values="peer_contractual_maturity_date",
+        )
+        .reindex(index=all_dates, columns=all_cusips)
+        .ffill()
+    )
+    return wide.to_numpy(dtype="datetime64[D]")
+
+
+def _build_point_in_time_string_matrix(
+    panel: pd.DataFrame,
+    value_col: str,
+    all_dates: list[pd.Timestamp],
+    all_cusips: list[str],
+) -> np.ndarray:
+    if value_col not in panel.columns:
+        return np.full((len(all_dates), len(all_cusips)), "", dtype=object)
+
+    temp = panel[[GROUP_COL, DATE_COL, value_col]].copy()
+    temp[value_col] = (
+        temp[value_col]
+        .astype("string")
+        .str.upper()
+        .str.strip()
+        .replace({"": pd.NA, "NAN": pd.NA, "<NA>": pd.NA})
+    )
+    temp = (
+        temp.dropna(subset=[GROUP_COL, DATE_COL, value_col])
+        .sort_values([DATE_COL, GROUP_COL])
+        .drop_duplicates([DATE_COL, GROUP_COL], keep="last")
+    )
+    if temp.empty:
+        return np.full((len(all_dates), len(all_cusips)), "", dtype=object)
+
+    return (
+        temp.pivot(index=DATE_COL, columns=GROUP_COL, values=value_col)
+        .reindex(index=all_dates, columns=all_cusips)
+        .ffill()
+        .fillna("")
+        .astype(str)
+        .to_numpy()
+    )
 
 
 def build_peer_candidate_groups(
-    meta: pd.DataFrame,
+    panel: pd.DataFrame,
+    all_dates: list[pd.Timestamp],
+    all_cusips: list[str],
     cusip_to_col: dict[str, int],
-) -> tuple[dict, dict, dict, dict[str, int]]:
-    meta = meta.copy()
-    meta = meta[meta[GROUP_COL].isin(cusip_to_col)].dropna(
-        subset=["peer_issuer", "peer_maturity_bucket"]
+) -> tuple[dict, dict, dict]:
+    issuer_temp = panel[[GROUP_COL, DATE_COL, "peer_issuer"]].copy()
+    issuer_temp = (
+        issuer_temp.dropna(subset=[GROUP_COL, DATE_COL, "peer_issuer"])
+        .sort_values([DATE_COL, GROUP_COL])
+        .drop_duplicates([DATE_COL, GROUP_COL], keep="last")
+    )
+    issuer_matrix = (
+        issuer_temp.pivot(
+            index=DATE_COL,
+            columns=GROUP_COL,
+            values="peer_issuer",
+        )
+        .reindex(index=all_dates, columns=all_cusips)
+        .ffill()
+        .fillna("")
+        .astype(str)
+        .to_numpy()
+    )
+    maturity_matrix = _build_maturity_date_matrix(
+        panel,
+        all_dates=all_dates,
+        all_cusips=all_cusips,
     )
 
-    meta["col"] = meta[GROUP_COL].map(cusip_to_col)
+    same_map: dict[tuple[int, str, str], list[int]] = {}
+    other_map: dict[tuple[int, str, str], list[int]] = {}
+    sector_map: dict[tuple[int, str], list[int]] = {}
+    bin_edges = np.asarray(MATURITY_BINS, dtype=float)
 
-    same_issuer_bucket: dict[tuple[str, str], list[int]] = {}
-    other_bank_bucket: dict[tuple[str, str], list[int]] = {}
-    sector_bucket: dict[str, list[int]] = {}
+    for end_idx, target_date in enumerate(all_dates):
+        maturity_dates = maturity_matrix[end_idx]
+        issuer_array = issuer_matrix[end_idx]
+        valid_maturity = ~np.isnat(maturity_dates)
+        remaining_years = np.full(len(all_cusips), np.nan, dtype=float)
+        target_day = np.datetime64(pd.Timestamp(target_date).date(), "D")
+        remaining_years[valid_maturity] = (
+            (maturity_dates[valid_maturity] - target_day)
+            .astype("timedelta64[D]")
+            .astype(float)
+            / 365.25
+        )
+        bucket_codes = (
+            np.searchsorted(bin_edges, remaining_years, side="right") - 1
+        )
 
-    for bucket, g_bucket in meta.groupby("peer_maturity_bucket"):
-        sector_bucket[str(bucket)] = g_bucket["col"].astype(int).tolist()
+        for code, label in enumerate(MATURITY_LABELS):
+            bucket_cols = np.flatnonzero(
+                valid_maturity
+                & (remaining_years >= MATURITY_BINS[0])
+                & (bucket_codes == code)
+            )
+            sector_map[(end_idx, label)] = bucket_cols.astype(int).tolist()
+            bucket_issuers = issuer_array[bucket_cols]
 
-        issuers = sorted(g_bucket["peer_issuer"].dropna().unique())
-        for issuer in issuers:
-            key = (str(issuer), str(bucket))
-            same = g_bucket.loc[g_bucket["peer_issuer"].eq(issuer), "col"].astype(int).tolist()
-            other = g_bucket.loc[~g_bucket["peer_issuer"].eq(issuer), "col"].astype(int).tolist()
-            same_issuer_bucket[key] = same
-            other_bank_bucket[key] = other
+            for issuer in pd.unique(bucket_issuers):
+                issuer = str(issuer)
+                if not issuer:
+                    continue
+                key = (end_idx, issuer, label)
+                same_map[key] = bucket_cols[
+                    bucket_issuers == issuer
+                ].astype(int).tolist()
+                other_map[key] = bucket_cols[
+                    bucket_issuers != issuer
+                ].astype(int).tolist()
 
-    return same_issuer_bucket, other_bank_bucket, sector_bucket, cusip_to_col
+    return same_map, other_map, sector_map
 
 
 def _mean_peer_return_for_row(
@@ -403,7 +643,9 @@ def _mean_peer_return_for_row(
     target_col: int,
     candidate_cols: list[int],
     log_price_ffill: np.ndarray,
-    obs_index_ffill: np.ndarray,
+    obs_ordinal_ffill: np.ndarray,
+    target_start_ordinal: float,
+    target_end_ordinal: float,
     max_staleness_bd: int,
     min_peers: int,
 ) -> tuple[float, int]:
@@ -412,34 +654,34 @@ def _mean_peer_return_for_row(
 
     cols = np.asarray(candidate_cols, dtype=int)
     cols = cols[cols != int(target_col)]
-
     if cols.size == 0:
         return np.nan, 0
 
     end_px = log_price_ffill[end_idx, cols]
     start_px = log_price_ffill[start_idx, cols]
+    end_source = obs_ordinal_ffill[end_idx, cols]
+    start_source = obs_ordinal_ffill[start_idx, cols]
 
-    end_obs_idx = obs_index_ffill[end_idx, cols]
-    start_obs_idx = obs_index_ffill[start_idx, cols]
-
-    end_age = end_idx - end_obs_idx
-    start_age = start_idx - start_obs_idx
-
-    ret = end_px - start_px
+    end_age = target_end_ordinal - end_source
+    start_age = target_start_ordinal - start_source
+    peer_return = end_px - start_px
 
     valid = (
-        np.isfinite(ret)
+        np.isfinite(peer_return)
         & np.isfinite(end_age)
         & np.isfinite(start_age)
+        & (end_age >= 0)
+        & (start_age >= 0)
         & (end_age <= max_staleness_bd)
         & (start_age <= max_staleness_bd)
+        & (end_source > target_start_ordinal)
     )
 
     n_valid = int(valid.sum())
     if n_valid < min_peers:
         return np.nan, n_valid
 
-    return float(np.nanmean(ret[valid])), n_valid
+    return float(np.mean(peer_return[valid])), n_valid
 
 
 def build_raw_peer_factors(
@@ -452,20 +694,60 @@ def build_raw_peer_factors(
     panel = panel.sort_values([DATE_COL, GROUP_COL]).reset_index(drop=False).rename(columns={"index": "_original_index"})
 
     matrices = _build_price_and_age_matrices(panel, log_price_col=log_price_col)
-    log_price_ffill, obs_index_ffill, all_dates, all_cusips, date_to_idx, cusip_to_col = matrices
+    (
+        log_price_ffill,
+        obs_ordinal_ffill,
+        date_ordinals,
+        all_dates,
+        all_cusips,
+        date_to_idx,
+        cusip_to_col,
+    ) = matrices
 
-    meta = (
-        panel[[GROUP_COL, "peer_issuer", "peer_maturity_bucket"]]
-        .drop_duplicates(GROUP_COL)
-        .copy()
+    calendar_anchor = np.asarray(all_dates, dtype="datetime64[D]").min()
+
+    def series_to_trace_ordinal(values: pd.Series) -> np.ndarray:
+        dt = pd.to_datetime(values, errors="coerce")
+        out = np.full(len(dt), np.nan, dtype=float)
+        valid = dt.notna().to_numpy()
+        if valid.any():
+            days = dt.loc[valid].dt.normalize().to_numpy(dtype="datetime64[D]")
+            out[valid] = np.busday_count(
+                calendar_anchor,
+                days,
+                busdaycal=TRACE_BUSINESS_CALENDAR,
+            ).astype(float)
+        return out
+
+    target_start_ordinals = series_to_trace_ordinal(panel[PREV_DATE_COL])
+    target_end_ordinals = series_to_trace_ordinal(panel[DATE_COL])
+
+    same_issuer_bucket, other_bank_bucket, sector_bucket = (
+        build_peer_candidate_groups(
+            panel=panel,
+            all_dates=all_dates,
+            all_cusips=all_cusips,
+            cusip_to_col=cusip_to_col,
+        )
     )
 
-    same_issuer_bucket, other_bank_bucket, sector_bucket, _ = build_peer_candidate_groups(meta, cusip_to_col)
+    legal_issuer_array = np.asarray(
+        [str(cusip)[:6] for cusip in all_cusips],
+        dtype=object,
+    )
+    structure_matrix = _build_point_in_time_string_matrix(
+        panel=panel,
+        value_col="peer_structure_key",
+        all_dates=all_dates,
+        all_cusips=all_cusips,
+    )
 
     out_cols = []
     for name in PEER_BASE_NAMES:
         out_cols.append(f"peer_raw_{name}")
         out_cols.append(f"peer_n_{name}")
+        out_cols.append(f"peer_raw_{name}_characteristic_matched")
+        out_cols.append(f"peer_n_{name}_characteristic_matched")
 
     peer_values = {col: np.full(len(panel), np.nan) for col in out_cols}
 
@@ -491,12 +773,17 @@ def build_raw_peer_factors(
             continue
 
         target_col = cusip_to_col[cusip]
-        key = (str(issuer), str(bucket))
+        key = (end_idx, str(issuer), str(bucket))
+        target_legal_issuer = str(cusip)[:6]
+        target_structure = str(structure_matrix[end_idx, target_col])
 
         candidate_map = {
             "same_issuer_maturity": same_issuer_bucket.get(key, []),
             "other_bank_maturity": other_bank_bucket.get(key, []),
-            "bank_sector_maturity": sector_bucket.get(str(bucket), []),
+            "bank_sector_maturity": sector_bucket.get(
+                (end_idx, str(bucket)),
+                [],
+            ),
         }
 
         for name, candidates in candidate_map.items():
@@ -506,13 +793,42 @@ def build_raw_peer_factors(
                 target_col=target_col,
                 candidate_cols=candidates,
                 log_price_ffill=log_price_ffill,
-                obs_index_ffill=obs_index_ffill,
+                obs_ordinal_ffill=obs_ordinal_ffill,
+                target_start_ordinal=target_start_ordinals[pos],
+                target_end_ordinal=target_end_ordinals[pos],
                 max_staleness_bd=max_staleness_bd,
                 min_peers=min_peers,
             )
 
             peer_values[f"peer_raw_{name}"][pos] = value
             peer_values[f"peer_n_{name}"][pos] = n_valid
+
+            strict_candidates = np.asarray(candidates, dtype=int)
+            if strict_candidates.size and target_structure:
+                strict_candidates = strict_candidates[
+                    structure_matrix[end_idx, strict_candidates] == target_structure
+                ]
+                if name == "same_issuer_maturity":
+                    strict_candidates = strict_candidates[
+                        legal_issuer_array[strict_candidates] == target_legal_issuer
+                    ]
+            else:
+                strict_candidates = np.asarray([], dtype=int)
+
+            strict_value, strict_n = _mean_peer_return_for_row(
+                end_idx=end_idx,
+                start_idx=start_idx,
+                target_col=target_col,
+                candidate_cols=strict_candidates.astype(int).tolist(),
+                log_price_ffill=log_price_ffill,
+                obs_ordinal_ffill=obs_ordinal_ffill,
+                target_start_ordinal=target_start_ordinals[pos],
+                target_end_ordinal=target_end_ordinals[pos],
+                max_staleness_bd=max_staleness_bd,
+                min_peers=min_peers,
+            )
+            peer_values[f"peer_raw_{name}_characteristic_matched"][pos] = strict_value
+            peer_values[f"peer_n_{name}_characteristic_matched"][pos] = strict_n
 
     peer_df = panel[["_original_index"]].copy()
     for col, values in peer_values.items():
@@ -732,7 +1048,6 @@ def restrict_to_equity_horse_race_common_sample(
     panel: pd.DataFrame,
     peer_variant: str = "raw",
 ) -> pd.DataFrame:
-
     peer_features = [f"peer_{peer_variant}_{name}" for name in PEER_BASE_NAMES]
 
     required = (
@@ -970,6 +1285,7 @@ def run_gap_sensitivity(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     result_parts = []
     coef_parts = []
+    pred_parts = []
 
     for peer_variant in peer_variants:
         specs = get_model_specs(panel, peer_variant=peer_variant)
@@ -995,10 +1311,19 @@ def build_peer_factor_coverage(panel: pd.DataFrame) -> pd.DataFrame:
     rows = []
 
     for name in PEER_BASE_NAMES:
-        n_col = f"peer_n_{name}"
+        feature_specs = [
+            (variant, f"peer_{variant}_{name}", f"peer_n_{name}")
+            for variant in PEER_VARIANTS
+        ]
+        feature_specs.append(
+            (
+                "raw_characteristic_matched",
+                f"peer_raw_{name}_characteristic_matched",
+                f"peer_n_{name}_characteristic_matched",
+            )
+        )
 
-        for variant in PEER_VARIANTS:
-            col = f"peer_{variant}_{name}"
+        for variant, col, n_col in feature_specs:
             if col not in panel.columns:
                 continue
 
@@ -1139,12 +1464,12 @@ def run_balanced_peer_sample_comparison(
     target: str,
     gap_threshold: int = MODEL_READY_MAX_BUSINESS_GAP,
     peer_variants: list[str] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     peer_variants = peer_variants or MODEL_PEER_VARIANTS
 
     result_parts = []
     coef_parts = []
+    pred_parts = []
 
     for peer_variant in peer_variants:
         specs = get_model_specs(panel, peer_variant=peer_variant)
@@ -1175,7 +1500,7 @@ def run_balanced_peer_sample_comparison(
         )
         balanced_specs = {name: specs[name] for name in names if name in specs}
 
-        results, coefs, _ = run_model_specs(
+        results, coefs, preds = run_model_specs(
             panel=balanced,
             target=target,
             model_specs=balanced_specs,
@@ -1193,10 +1518,177 @@ def run_balanced_peer_sample_comparison(
             coefs["balanced_reference_model"] = m4_name
             coef_parts.append(coefs)
 
+        if not preds.empty:
+            preds["sample_type"] = "balanced_m4_complete_cases"
+            preds["balanced_reference_model"] = m4_name
+            pred_parts.append(preds)
+
     results_df = pd.concat(result_parts, ignore_index=True) if result_parts else pd.DataFrame()
     coefs_df = pd.concat(coef_parts, ignore_index=True) if coef_parts else pd.DataFrame()
+    preds_df = pd.concat(pred_parts, ignore_index=True) if pred_parts else pd.DataFrame()
 
-    return results_df, coefs_df
+    return results_df, coefs_df, preds_df
+
+
+def build_equal_weighted_prediction_metrics(
+    predictions: pd.DataFrame,
+    target: str,
+) -> pd.DataFrame:
+    if predictions.empty:
+        return pd.DataFrame()
+
+    df = predictions.loc[
+        predictions[SPLIT_COL].isin(["validation", "test"])
+    ].copy()
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+    df["squared_error"] = (
+        pd.to_numeric(df[target], errors="coerce")
+        - pd.to_numeric(df["fitted_return"], errors="coerce")
+    ) ** 2
+    df["absolute_error"] = (
+        pd.to_numeric(df[target], errors="coerce")
+        - pd.to_numeric(df["fitted_return"], errors="coerce")
+    ).abs()
+    df["calendar_month"] = df[DATE_COL].dt.to_period("M").astype(str)
+
+    rows = []
+    group_cols = ["peer_variant", "model", SPLIT_COL]
+    for keys, g in df.groupby(group_cols, dropna=False):
+        g = g.dropna(subset=["squared_error", "absolute_error"])
+        if g.empty:
+            continue
+        cusip_mse = g.groupby(GROUP_COL)["squared_error"].mean()
+        cusip_mae = g.groupby(GROUP_COL)["absolute_error"].mean()
+        month_mse = g.groupby("calendar_month")["squared_error"].mean()
+        month_mae = g.groupby("calendar_month")["absolute_error"].mean()
+        rows.append(
+            {
+                "peer_variant": keys[0],
+                "model": keys[1],
+                "sample_split": keys[2],
+                "n_rows": int(len(g)),
+                "n_cusips": int(g[GROUP_COL].nunique()),
+                "n_months": int(g["calendar_month"].nunique()),
+                "row_weighted_rmse": float(np.sqrt(g["squared_error"].mean())),
+                "row_weighted_mae": float(g["absolute_error"].mean()),
+                "cusip_equal_weighted_rmse": float(np.sqrt(cusip_mse.mean())),
+                "cusip_equal_weighted_mae": float(cusip_mae.mean()),
+                "month_equal_weighted_rmse": float(np.sqrt(month_mse.mean())),
+                "month_equal_weighted_mae": float(month_mae.mean()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def paired_month_block_bootstrap_m3_vs_m4(
+    predictions: pd.DataFrame,
+    target: str,
+    n_boot: int = 2000,
+    seed: int = RANDOM_SEED,
+) -> pd.DataFrame:
+    if predictions.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for peer_variant in MODEL_PEER_VARIANTS:
+        m3_name = "M3_rates_equity_vix"
+        m4_name = f"M4_rates_equity_vix_peer_{peer_variant}"
+        for split in ["validation", "test"]:
+            base = predictions.loc[
+                predictions["peer_variant"].eq(peer_variant)
+                & predictions[SPLIT_COL].eq(split)
+                & predictions["model"].isin([m3_name, m4_name])
+            ].copy()
+            if base.empty:
+                continue
+
+            key_cols = ["_sample_index", GROUP_COL, DATE_COL]
+            key_cols = [c for c in key_cols if c in base.columns]
+            keep = key_cols + [target, "model", "fitted_return"]
+            wide = base[keep].pivot_table(
+                index=key_cols + [target],
+                columns="model",
+                values="fitted_return",
+                aggfunc="first",
+            ).reset_index()
+            if m3_name not in wide.columns or m4_name not in wide.columns:
+                continue
+
+            wide[DATE_COL] = pd.to_datetime(wide[DATE_COL], errors="coerce")
+            y = pd.to_numeric(wide[target], errors="coerce")
+            wide["loss_reduction_m3_to_m4"] = (
+                (y - pd.to_numeric(wide[m3_name], errors="coerce")) ** 2
+                - (y - pd.to_numeric(wide[m4_name], errors="coerce")) ** 2
+            )
+            wide = wide.dropna(subset=["loss_reduction_m3_to_m4", DATE_COL])
+            if wide.empty:
+                continue
+            wide["calendar_month"] = wide[DATE_COL].dt.to_period("M").astype(str)
+            month_values = {
+                month: g["loss_reduction_m3_to_m4"].to_numpy(dtype=float)
+                for month, g in wide.groupby("calendar_month")
+            }
+            months = np.asarray(list(month_values), dtype=object)
+            rng = np.random.default_rng(seed + (0 if split == "validation" else 1))
+            boot = np.empty(n_boot, dtype=float)
+            for b in range(n_boot):
+                sampled = rng.choice(months, size=len(months), replace=True)
+                boot[b] = np.concatenate([month_values[m] for m in sampled]).mean()
+
+            observed = float(wide["loss_reduction_m3_to_m4"].mean())
+            rows.append(
+                {
+                    "peer_variant": peer_variant,
+                    "sample_split": split,
+                    "comparison": "M3_to_M4",
+                    "n_rows": int(len(wide)),
+                    "n_months": int(len(months)),
+                    "mean_squared_error_reduction": observed,
+                    "ci95_lower": float(np.quantile(boot, 0.025)),
+                    "ci95_upper": float(np.quantile(boot, 0.975)),
+                    "bootstrap_probability_positive": float(np.mean(boot > 0)),
+                    "bootstrap_method": "paired_calendar_month_block",
+                    "n_bootstrap": int(n_boot),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def run_characteristic_matched_peer_robustness(
+    panel: pd.DataFrame,
+    target: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    standard = available(RATES_FEATURES + EQUITY_FEATURES + VIX_FEATURES, panel)
+    broad = [f"peer_raw_{name}" for name in PEER_BASE_NAMES]
+    strict = [
+        f"peer_raw_{name}_characteristic_matched"
+        for name in PEER_BASE_NAMES
+    ]
+    required = [GROUP_COL, DATE_COL, target] + standard + broad + strict
+    if any(col not in panel.columns for col in required):
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    gap_flag = f"valid_return_gap_{MODEL_READY_MAX_BUSINESS_GAP}bd"
+    common = panel.loc[panel[gap_flag]].dropna(subset=required).copy()
+    if common.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    specs = {
+        "M3_characteristic_common": standard,
+        "M4_broad_characteristic_common": standard + broad,
+        "M4_characteristic_matched": standard + strict,
+    }
+    results, coefs, preds = run_model_specs(
+        panel=common,
+        target=target,
+        model_specs=specs,
+        gap_threshold=None,
+        peer_variant="characteristic_matched",
+    )
+    for frame in [results, coefs, preds]:
+        if not frame.empty:
+            frame["sample_type"] = "common_characteristic_matched_complete_cases"
+    return results, coefs, preds
 
 
 def build_incremental_contribution_summary(results: pd.DataFrame) -> pd.DataFrame:
@@ -1243,7 +1735,6 @@ def build_incremental_contribution_summary(results: pd.DataFrame) -> pd.DataFram
     return pd.concat(out_parts, ignore_index=True) if out_parts else pd.DataFrame()
 
 def build_peer_validation_selection(results: pd.DataFrame) -> pd.DataFrame:
-
     if results.empty:
         return pd.DataFrame()
 
@@ -1289,7 +1780,6 @@ def build_peer_validation_selection(results: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_model_estimation_summary(results: pd.DataFrame, target: str) -> pd.DataFrame:
-
     if results.empty:
         return pd.DataFrame()
 
@@ -1359,7 +1849,6 @@ def build_design_diagnostics(
     gap_threshold: int = MODEL_READY_MAX_BUSINESS_GAP,
     peer_variants: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-
     peer_variants = peer_variants or PEER_VARIANTS
     design_rows = []
     vif_rows = []
@@ -1430,7 +1919,6 @@ def build_design_diagnostics(
                     row["max_abs_feature_corr"] = float(offdiag.max())
                     row["mean_abs_feature_corr"] = float(offdiag.mean())
 
-
                 for feature in X.columns:
                     other = [c for c in X.columns if c != feature]
                     if not other:
@@ -1462,7 +1950,6 @@ def build_design_diagnostics(
 
 
 def build_residual_diagnostics(predictions: pd.DataFrame) -> pd.DataFrame:
-
     if predictions.empty:
         return pd.DataFrame()
 
@@ -1717,7 +2204,6 @@ def write_manifest(output_paths: list[Path]) -> None:
         json.dump(manifest, fh, indent=2)
 
 
-
 def main() -> None:
     ensure_directories()
     TABLES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1728,7 +2214,7 @@ def main() -> None:
     panel = pd.read_parquet(REGRESSION_PANEL_PATH)
     panel = prepare_panel(panel)
     panel, log_price_col = choose_log_price_column(panel)
-    panel, peer_meta = add_static_peer_metadata(panel)
+    panel, peer_meta = add_point_in_time_peer_metadata(panel)
 
     target = choose_target(panel)
 
@@ -1738,8 +2224,35 @@ def main() -> None:
     print("CUSIPs:", panel[GROUP_COL].nunique())
     print("Date range:", panel[DATE_COL].min(), "to", panel[DATE_COL].max())
 
-    peer_meta_path = TABLES_DIR / "peer_static_metadata.csv"
+    peer_meta_path = TABLES_DIR / "peer_point_in_time_metadata.csv"
     peer_meta.to_csv(peer_meta_path, index=False)
+
+    assert_point_in_time_maturity_bucket(
+        panel,
+        years_col="years_to_maturity",
+        bucket_col="peer_maturity_bucket",
+        bins=MATURITY_BINS,
+        labels=MATURITY_LABELS,
+    )
+
+    train_cusips = set(
+        panel.loc[panel[DATE_COL] < TRAIN_END_DATE, GROUP_COL].dropna()
+    )
+    panel["seen_in_static_training"] = panel[GROUP_COL].isin(train_cusips)
+    seen_audit = (
+        assign_sample_split(panel)
+        .groupby(SPLIT_COL)
+        .agg(
+            rows=(GROUP_COL, "size"),
+            cusips=(GROUP_COL, "nunique"),
+            unseen_rows=("seen_in_static_training", lambda x: int((~x).sum())),
+        )
+        .reset_index()
+    )
+    seen_audit.to_csv(
+        TABLES_DIR / "peer_seen_unseen_cusip_audit.csv",
+        index=False,
+    )
 
     print("\nBuilding raw peer factors...")
     panel = build_raw_peer_factors(
@@ -1860,7 +2373,7 @@ def main() -> None:
     print(f"Saved equity proxy horse-race predictions to: {equity_hr_preds_path}")
 
     print("\nRunning balanced peer-sample comparison...")
-    balanced_results, balanced_coefs = run_balanced_peer_sample_comparison(
+    balanced_results, balanced_coefs, balanced_preds = run_balanced_peer_sample_comparison(
         panel=panel,
         target=target,
         gap_threshold=MODEL_READY_MAX_BUSINESS_GAP,
@@ -1869,8 +2382,42 @@ def main() -> None:
 
     balanced_results_path = TABLES_DIR / "peer_balanced_gap5_model_results.csv"
     balanced_coefs_path = TABLES_DIR / "peer_balanced_gap5_model_coefficients.csv"
+    balanced_preds_path = REGRESSION_DIR / "peer_balanced_gap5_model_predictions.parquet"
     balanced_results.to_csv(balanced_results_path, index=False)
     balanced_coefs.to_csv(balanced_coefs_path, index=False)
+    balanced_preds.to_parquet(balanced_preds_path, index=False)
+
+    equal_weighted_metrics = build_equal_weighted_prediction_metrics(
+        balanced_preds, target=target
+    )
+    equal_weighted_metrics.to_csv(
+        TABLES_DIR / "peer_balanced_equal_weighted_metrics.csv",
+        index=False,
+    )
+    m3_m4_bootstrap = paired_month_block_bootstrap_m3_vs_m4(
+        balanced_preds, target=target
+    )
+    m3_m4_bootstrap.to_csv(
+        TABLES_DIR / "peer_balanced_m3_m4_paired_block_bootstrap.csv",
+        index=False,
+    )
+    characteristic_results, characteristic_coefs, characteristic_preds = (
+        run_characteristic_matched_peer_robustness(panel, target=target)
+    )
+    characteristic_results.to_csv(
+        TABLES_DIR / "peer_characteristic_matched_robustness_results.csv",
+        index=False,
+    )
+    characteristic_coefs.to_csv(
+        TABLES_DIR / "peer_characteristic_matched_robustness_coefficients.csv",
+        index=False,
+    )
+    if not characteristic_preds.empty:
+        characteristic_preds.to_parquet(
+            REGRESSION_DIR / "peer_characteristic_matched_robustness_predictions.parquet",
+            index=False,
+        )
+
     balanced_validation_selection = build_peer_validation_selection(balanced_results)
     balanced_validation_selection_path = TABLES_DIR / "peer_balanced_validation_model_selection_gap5.csv"
     balanced_validation_selection.to_csv(balanced_validation_selection_path, index=False)

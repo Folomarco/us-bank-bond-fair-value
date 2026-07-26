@@ -100,7 +100,6 @@ def to_numeric_safe(s: pd.Series) -> pd.Series:
     )
 
 
-
 stocks_raw = read_wrds_zip(RAW_ZIP)
 
 print("\nRAW CRSP STOCK DATA")
@@ -510,6 +509,21 @@ stocks_clean = (
 
 stocks_clean = stocks_clean.sort_values(["ticker", "date"])
 
+_total_ret = pd.to_numeric(stocks_clean["ret_with_dlret"], errors="coerce")
+_valid_total_ret = _total_ret.where(_total_ret > -1.0)
+stocks_clean["log_total_return"] = np.log1p(_valid_total_ret)
+stocks_clean["missing_total_return_flag"] = stocks_clean["log_total_return"].isna().astype(int)
+stocks_clean["cum_log_total_return"] = (
+    stocks_clean["log_total_return"]
+    .fillna(0.0)
+    .groupby(stocks_clean["ticker"])
+    .cumsum()
+)
+stocks_clean["cum_missing_total_return_count"] = (
+    stocks_clean["missing_total_return_flag"]
+    .groupby(stocks_clean["ticker"])
+    .cumsum()
+)
 
 stocks_clean["equity_vol_20d"] = (
     stocks_clean
@@ -540,6 +554,10 @@ equity_cols = [
     "ret",
     "retx",
     "ret_with_dlret",
+    "log_total_return",
+    "cum_log_total_return",
+    "missing_total_return_flag",
+    "cum_missing_total_return_count",
     "volume",
     "shrout",
     "market_cap_raw",

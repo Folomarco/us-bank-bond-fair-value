@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hashlib
@@ -75,7 +76,6 @@ def assert_panel_integrity(
     forbid_weekends: bool = True,
     fail_fast: bool = True,
 ) -> pd.DataFrame:
-
     required_columns = required_columns or []
     required_nonmissing = required_nonmissing or []
     required_nonnegative = required_nonnegative or []
@@ -141,7 +141,6 @@ def assert_panel_integrity(
         add_check("weekend_rows", weekend_rows, 0, weekend_rows == 0)
 
     if group_col and group_col in df.columns:
-
         date_diff = date_values.groupby(df[group_col]).diff()
         non_monotonic = int(date_diff.lt(pd.Timedelta(0)).fillna(False).sum())
 
@@ -163,7 +162,6 @@ def assert_panel_integrity(
             0,
             prev_ge_date == 0,
         )
-
 
     for col in required_nonmissing:
         if col not in df.columns:
@@ -233,7 +231,6 @@ def assert_panel_integrity(
         inf_count = 0
 
     add_check("infinite_numeric_values", inf_count, 0, inf_count == 0)
-
 
     if "business_gap_days" in df.columns:
         gap = pd.to_numeric(df["business_gap_days"], errors="coerce")
@@ -357,3 +354,54 @@ def write_run_manifest(
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
     return manifest
+
+def assert_no_future_source_dates(
+    df: pd.DataFrame,
+    target_date_col: str,
+    source_date_cols: list[str],
+) -> None:
+    if target_date_col not in df.columns:
+        raise ValueError(f"Missing target date column: {target_date_col}")
+
+    target = pd.to_datetime(df[target_date_col], errors="coerce")
+
+    for col in source_date_cols:
+        if col not in df.columns:
+            continue
+
+        source = pd.to_datetime(df[col], errors="coerce")
+        invalid = source.notna() & target.notna() & source.gt(target)
+
+        if invalid.any():
+            raise AssertionError(
+                f"{col} contains {int(invalid.sum())} source dates after "
+                f"{target_date_col}."
+            )
+
+
+def assert_point_in_time_maturity_bucket(
+    df: pd.DataFrame,
+    years_col: str,
+    bucket_col: str,
+    bins: list[float],
+    labels: list[str],
+) -> None:
+    missing = [c for c in [years_col, bucket_col] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing maturity-bucket audit columns: {missing}")
+
+    expected = pd.cut(
+        pd.to_numeric(df[years_col], errors="coerce"),
+        bins=bins,
+        labels=labels,
+        right=False,
+    ).astype("string")
+
+    actual = df[bucket_col].astype("string")
+    mismatch = expected.notna() & actual.notna() & expected.ne(actual)
+
+    if mismatch.any():
+        raise AssertionError(
+            "Point-in-time maturity bucket mismatch on "
+            f"{int(mismatch.sum())} rows."
+        )
