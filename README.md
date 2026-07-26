@@ -59,7 +59,7 @@ pip install -r requirements.txt
 ## Execution
 
 No wrapper scripts are included. Run the Python files manually from the
-repository root in the order documented in
+`src/` directory in the order documented in
 [`src/README.md`](src/README.md).
 
 Project-relative paths, input filenames and output directories are defined in
