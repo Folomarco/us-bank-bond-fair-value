@@ -1119,7 +1119,7 @@ def main() -> None:
     plot_abs_residual_ecdf(predictions, model_order)
 
     manifest = {
-        "script": "dynamic_state_space_extended_models.py",
+        "script": "dynamic_state_space_models.py",
         "input_panel": PANEL_PATH,
         "target": TARGET_COL,
         "features": M4_FEATURES,
