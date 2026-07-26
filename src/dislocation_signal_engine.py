@@ -2320,7 +2320,7 @@ def write_figures(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
 
 def write_manifest(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
     manifest = {
-        "script": "dislocation_signal_engine_v3.py",
+        "script": "dislocation_signal_engine.py",
         "input_predictions_path": str(PREDICTIONS_PATH),
         "input_panel_with_peers_path": str(PANEL_WITH_PEERS_PATH),
         "peer_variant": PEER_VARIANT,
