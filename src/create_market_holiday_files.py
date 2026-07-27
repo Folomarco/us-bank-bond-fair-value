@@ -6,8 +6,6 @@ from config_institutional import REFERENCE_DIR, ensure_directories
 ensure_directories()
 REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
 
-# NYSE full-day market closures.
-# Includes Good Friday and full equity-market closures.
 NYSE_HOLIDAYS = [
     # 2016
     "2016-01-01", "2016-01-18", "2016-02-15", "2016-03-25",
@@ -60,10 +58,6 @@ NYSE_HOLIDAYS = [
     "2025-09-01", "2025-11-27", "2025-12-25",
 ]
 
-# TRACE OTC / SIFMA-style full-day fixed-income market closures.
-# This includes the usual fixed-income full closures, including Columbus Day
-# and Veterans Day, which are not NYSE holidays.
-# Early-close days are intentionally not listed as full holidays.
 TRACE_OTC_HOLIDAYS = [
     # 2016
     "2016-01-01", "2016-01-18", "2016-02-15", "2016-03-25",
