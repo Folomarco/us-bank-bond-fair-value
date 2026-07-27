@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 CODE_DIR = PROJECT_ROOT / "code"
@@ -65,7 +64,6 @@ TRACE_BOND_DAY_LIQUID_POINT_IN_TIME_PATH = (
 
 
 TRACE_FINAL_BASELINE_PANEL_PATH = BOND_DAY_DIR / "trace_banks_final_baseline_panel.parquet"
-
 TRACE_CONVERGENCE_PRICE_PATH = TRACE_FINAL_BASELINE_PANEL_PATH
 TRACE_MODEL_READY_PATH = BOND_DAY_DIR / "trace_banks_final_model_ready_gap_sensitivity.parquet"
 TRACE_MODEL_READY_GAP5_PATH = BOND_DAY_DIR / "trace_banks_final_model_ready_gap5.parquet"
