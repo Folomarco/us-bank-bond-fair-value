@@ -40,19 +40,14 @@ from calendar_utils import (
     load_market_holidays,
 )
 
-# Optional paths. These are also added in config_updated.py. The fallback keeps this
-# script usable even if you have not yet copied the updated config.py.
 try:
     from config_institutional import TRACE_CLEANED_TRADE_DIR, TRACE_CLEANING_DIAG_DIR
-except ImportError:  # pragma: no cover - fallback for old config.py
+except ImportError:
     TRACE_CLEANED_TRADE_DIR = PROCESSED_DIR / "trace_cleaned_trades"
     TRACE_CLEANING_DIAG_DIR = PROCESSED_DIR / "diagnostics" / "trace_cleaning"
 
 print("TRACE_CLEANED_TRADE_DIR:", TRACE_CLEANED_TRADE_DIR)
 print("TRACE_CLEANING_DIAG_DIR:", TRACE_CLEANING_DIAG_DIR)
-# ============================================================
-# CONFIG
-# ============================================================
 
 ensure_directories()
 TRACE_BUSINESS_CALENDAR = load_market_holidays(
@@ -86,20 +81,6 @@ print("Using RAW_DIR:", RAW_DIR.resolve())
 print("Zip files found:", [p.name for p in RAW_FILES])
 
 
-# ============================================================
-# TRACE CLEANING POLICY
-# ============================================================
-
-# The WRDS extract can expose different coding conventions in trc_st.
-#
-# - academic_tcw: traditional Academic TRACE lifecycle codes.
-# - enhanced_txcyr: enhanced post-2012 lifecycle codes.
-# - wrds_mno: FINRA BTDS dissemination message types used by the current
-#   WRDS extract: M = trade report, N = trade cancel and O = trade correction.
-#   N/O messages reference the affected original through orig_msg_seq_nb.
-#
-# The schema is detected from the observed trc_st values unless explicitly
-# fixed in config.
 TRACE_STATUS_POLICIES = {
     "academic_tcw": {
         "T": "regular",
@@ -120,8 +101,6 @@ TRACE_STATUS_POLICIES = {
     },
 }
 
-# Textual values are retained only as an explicit fallback for extracts that
-# spell out statuses. Short letter codes are never pooled across schemas.
 TEXTUAL_STATUS_ACTIONS = {
     "TRADE": "regular",
     "NEW": "regular",
@@ -149,9 +128,6 @@ TEXTUAL_STATUS_ACTIONS = {
 
 REGULAR_FRMT_VALUES = {"A", "E"}
 
-# The frmt_cd field is not fully standardised across all WRDS TRACE pulls. Therefore,
-# only obviously non-regular textual/special values are excluded in the baseline. All
-# values are diagnosed so this can be tightened after inspection.
 SPECIAL_FRMT_VALUES = {
     "CANCEL", "CANCELLED", "CANCELED", "CORR", "CORRECT", "CORRECTION",
     "REV", "REVERSAL", "REVERSED", "SPECIAL", "ASOF", "AS-OF", "WHENISSUED",
@@ -168,10 +144,6 @@ MODEL_READY_MAX_BUSINESS_GAP = 5
 GAP_THRESHOLDS = [1, 3, 5, 10]
 MAX_SENSITIVITY_GAP = max(GAP_THRESHOLDS)
 
-
-# ============================================================
-# GENERIC HELPERS
-# ============================================================
 
 def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Standardise WRDS column names."""
@@ -442,9 +414,6 @@ def audit_master_pit_consistency(
     master["stdt_effective"] = pd.to_datetime(master["stdt_effective"], errors="coerce")
     master["enddt_effective"] = pd.to_datetime(master["enddt_effective"], errors="coerce")
 
-    # ------------------------------------------------------------
-    # 1. Invalid validity intervals
-    # ------------------------------------------------------------
 
     invalid_interval = (
         master["stdt_effective"].isna()
@@ -476,10 +445,6 @@ def audit_master_pit_consistency(
     invalid_path = DIAG_DIR / f"{output_prefix}_invalid_interval_rows.csv"
     invalid_rows.to_csv(invalid_path, index=False)
 
-    # ------------------------------------------------------------
-    # 2. Overlapping validity intervals by CUSIP
-    # ------------------------------------------------------------
-
     m = master.sort_values(
         ["cusip_id", "stdt_effective", "enddt_effective"]
     ).copy()
@@ -487,7 +452,6 @@ def audit_master_pit_consistency(
     m["prev_stdt_effective"] = m.groupby("cusip_id")["stdt_effective"].shift(1)
     m["prev_enddt_effective"] = m.groupby("cusip_id")["enddt_effective"].shift(1)
 
-    # Treat intervals as closed [stdt, enddt], so equality is a potential overlap.
     overlap_mask = (
         m["prev_enddt_effective"].notna()
         & m["stdt_effective"].le(m["prev_enddt_effective"])
@@ -517,9 +481,6 @@ def audit_master_pit_consistency(
     overlap_path = DIAG_DIR / f"{output_prefix}_overlap_by_cusip.csv"
     overlaps.to_csv(overlap_path, index=False)
 
-    # ------------------------------------------------------------
-    # 3. Static or near-static field changes after PIT merge
-    # ------------------------------------------------------------
 
     pit_panel["date"] = pd.to_datetime(pit_panel["date"], errors="coerce")
     pit_panel["cusip_id"] = pit_panel["cusip_id"].astype(str).str.strip()
@@ -555,9 +516,6 @@ def audit_master_pit_consistency(
     static_path = DIAG_DIR / f"{output_prefix}_static_field_change_audit.csv"
     static_audit.to_csv(static_path, index=False)
 
-    # ------------------------------------------------------------
-    # 4. Non-monotonic years_to_maturity after PIT merge
-    # ------------------------------------------------------------
 
     ytm_path = DIAG_DIR / f"{output_prefix}_years_to_maturity_nonmonotonic_rows.csv"
 
@@ -654,10 +612,6 @@ def read_wrds_zip(zip_path: Path) -> pd.DataFrame:
     return normalise_columns(df)
 
 
-# ============================================================
-# TRADE-LEVEL CLEANING
-# ============================================================
-
 def clean_trade_chunk(df: pd.DataFrame) -> pd.DataFrame:
     """Parse WRDS TRACE fields and create canonical helper fields."""
     df = normalise_columns(df)
@@ -738,13 +692,10 @@ def detect_trace_status_policy(
     ):
         schema = "enhanced_txcyr"
     elif short_codes.issubset({"M", "N", "O"}) and "M" in short_codes:
-        # FINRA BTDS dissemination coding: M = report, N = cancel,
-        # O = correction. Original reports referenced by N/O are resolved
-        # separately through orig_msg_seq_nb.
+
         schema = "wrds_mno"
     elif short_codes in ({"T"}, {"T", "C"}, set()):
-        # T/C without W is observationally compatible with both schemas, but C
-        # is non-price-bearing in either one, so the academic mapping is safe.
+
         schema = "academic_tcw"
     else:
         audit = pd.DataFrame(
@@ -955,9 +906,6 @@ def apply_trace_cleaner(
     )
     df["is_correction_report"] = status_action.eq("correction")
     df["is_reversal_report"] = status_action.eq("reversal")
-
-    # frmt_cd is treated as a format/condition field only. It is never pooled
-    # with trc_st to infer lifecycle actions.
     df["is_special_condition"] = frmt.isin(SPECIAL_FRMT_VALUES)
     df["is_regular_status"] = status_action.eq("regular")
     df["is_regular_format"] = frmt.isin(REGULAR_FRMT_VALUES)
@@ -1004,10 +952,6 @@ def apply_trace_cleaner(
         df["reference_target_resolved_unique"] = False
         df["reference_target_resolved_ambiguous"] = False
 
-    # Regular reports are price-bearing. Corrections are price-bearing too, but
-    # for the WRDS M/N/O feed they are admitted only when the original report is
-    # uniquely identified on the same execution date. Cancels and reversals are
-    # never price-bearing observations.
     df["is_usable_trade_message"] = (
         df["is_regular_status"] | df["is_correction_report"]
     )
@@ -1020,9 +964,6 @@ def apply_trace_cleaner(
             )
         )
 
-    # Backward-compatible name used throughout the original pipeline. The main
-    # sample removes only uniquely resolved originals; ambiguous matches remain
-    # visible and are removed in reference-safe/strict robustness samples.
     df["is_referenced_original"] = df["is_referenced_original_unique"]
     df["is_referenced_original_any"] = (
         df["is_referenced_original_unique"]
@@ -1085,8 +1026,6 @@ def apply_trace_cleaner(
         else False
     )
 
-    # A valid price observation is not conditioned on the reported yield. Yield
-    # validity is applied only to the separate yield sample.
     df["basic_valid_price_trade"] = (
         df["valid_date"]
         & df["valid_cusip"]
@@ -1229,10 +1168,6 @@ def build_trade_cleaning_waterfall(df: pd.DataFrame, file_name: str) -> pd.DataF
 
     return pd.DataFrame(rows)
 
-
-# ============================================================
-# BOND-DAY AGGREGATION
-# ============================================================
 
 def add_trade_side_fields(df: pd.DataFrame, volume_col: str) -> pd.DataFrame:
     df = df.copy()
@@ -1511,10 +1446,6 @@ def add_bond_day_returns(bond_day: pd.DataFrame) -> pd.DataFrame:
     return bond_day
 
 
-# ============================================================
-# MAIN STAGES
-# ============================================================
-
 def convert_raw_zips_to_parquet() -> list[Path]:
     print("\nRAW FILES FOUND:")
     for file in RAW_FILES:
@@ -1621,7 +1552,6 @@ def build_global_message_reference_index(
         out["orig_msg_seq_nb"] = clean_id_series(out["orig_msg_seq_nb"])
         return out
 
-    # Pass 1: collect references only.
     reference_parts: list[pd.DataFrame] = []
     for path in parquet_files:
         temp = read_reference_columns(path)
@@ -1659,7 +1589,6 @@ def build_global_message_reference_index(
     refs_all = pd.concat(reference_parts, ignore_index=True)
     referenced_message_keys = set(refs_all["_message_key"].unique())
 
-    # Pass 2: retain only current messages whose key is referenced somewhere.
     message_count_parts: list[pd.DataFrame] = []
     for path in parquet_files:
         temp = read_reference_columns(path)
@@ -1711,9 +1640,6 @@ def build_global_message_reference_index(
         matched["original_execution_date"] = pd.NaT
         matched["candidate_original_matches_on_date"] = np.nan
     else:
-        # Exact-date matching is deliberately stricter than a backward as-of
-        # join. Sequence identifiers can repeat, so linking a reference to a
-        # same-CUSIP message on an earlier date can remove an unrelated trade.
         matched = refs_all.merge(
             message_date_counts,
             left_on=["_message_key", "reference_execution_date"],
@@ -2057,9 +1983,6 @@ def write_bond_day_diagnostics(bond_day: pd.DataFrame) -> pd.DataFrame:
     bond_day["cusip_id"].dropna().astype(str).drop_duplicates().sort_values().to_csv(cusip_path, index=False, header=False)
     print(f"Saved CUSIP list to: {cusip_path}")
 
-    # ------------------------------------------------------------
-    # Three transparent activity universes
-    # ------------------------------------------------------------
     liquid_cusips_expost = set(
         liq_summary.loc[
             liq_summary["active_days"].ge(MIN_ACTIVE_DAYS)
@@ -2190,10 +2113,6 @@ def write_bond_day_diagnostics(bond_day: pd.DataFrame) -> pd.DataFrame:
     return bond_day_liquid
 
 
-# ============================================================
-# MASTER FILE POINT-IN-TIME MERGE AND FINAL MODEL SAMPLE
-# ============================================================
-
 
 def interval_join_latest_active(
     left_group: pd.DataFrame,
@@ -2204,16 +2123,6 @@ def interval_join_latest_active(
     end_col: str = "enddt_effective",
     chunk_size: int = 5000,
 ) -> pd.DataFrame:
-    """Point-in-time interval join using the latest *active* Master File row.
-
-    A simple backward ``merge_asof`` is insufficient when Master File validity
-    intervals overlap or are nested: the most recently started row may already
-    have expired while an earlier interval is still active. For every bond-date
-    this helper considers all rows satisfying ``start <= date <= end`` and
-    selects the one with the latest effective start date. The input right-hand
-    frame must already be deduplicated at ``(CUSIP, start date)`` using the
-    preferred completeness rule.
-    """
     left = left_group.sort_values(left_date_col).reset_index(drop=True).copy()
     right = right_group.sort_values(start_col).reset_index(drop=True).copy()
     right_cols = list(right.columns)
@@ -2234,7 +2143,6 @@ def interval_join_latest_active(
     selected = np.full(n_left, -1, dtype=np.int64)
     match_count = np.zeros(n_left, dtype=np.int32)
 
-    # Process left dates in chunks to bound the temporary active-interval matrix.
     for lo in range(0, n_left, chunk_size):
         hi = min(lo + chunk_size, n_left)
         dates_chunk = left_dates[lo:hi]
@@ -2252,8 +2160,6 @@ def interval_join_latest_active(
 
         has_match = counts > 0
         if has_match.any():
-            # right is sorted by effective start; the last active row is the
-            # latest-starting active interval.
             reverse_position = np.argmax(active[::-1, :], axis=0)
             chosen = len(right) - 1 - reverse_position
             chosen[~has_match] = -1
@@ -2267,9 +2173,6 @@ def interval_join_latest_active(
             picked.loc[~has_match, col] = pd.NaT
         else:
             picked.loc[~has_match, col] = np.nan
-
-    # Diagnostic: cases where a backward merge_asof would choose an expired
-    # latest-starting interval even though an earlier interval remains active.
     naive_idx = np.searchsorted(starts, left_dates, side="right") - 1
     naive_has_candidate = naive_idx >= 0
     naive_active = np.zeros(n_left, dtype=bool)
@@ -2355,7 +2258,6 @@ def build_final_panel_with_master() -> pd.DataFrame:
     master_latest.to_parquet(latest_path, index=False)
     master_latest.to_csv(latest_csv_path, index=False)
 
-    # Diagnostics for master composition.
     master_diag_rows = []
     for col in [ticker_col, issuer_col, sub_product_col, debt_type_col, security_type_col, security_subtype_col, coupon_type_col, callable_col, "ind_144a", "cnvrb_fl", "dissem"]:
         if col and col in master_latest.columns:
@@ -2614,8 +2516,6 @@ def apply_final_bond_filters(
     final_panel = final_panel.loc[baseline_conditions].copy()
     final_panel = final_panel.sort_values(["cusip_id", "date"])
 
-    # Recompute final returns after Master File filtering so the previous observation is inside the
-    # final investable universe.
     for price_col, return_col in [
         ("vwap_price", "final_vwap_return"),
         ("median_price", "final_median_price_return"),
@@ -2956,13 +2856,6 @@ def add_return_outlier_flags(
     mad_k: float = 8.0,
     abs_ret_hard: float = 0.15,
 ) -> pd.DataFrame:
-    """
-    Add post-aggregation return outlier flags.
-
-    These flags are diagnostic only. They are not used to remove observations
-    from the baseline sample, because large clean-price moves may reflect true
-    repricing or dislocation rather than data errors.
-    """
     out = df.copy()
 
     if ret_col not in out.columns:
@@ -2975,8 +2868,6 @@ def add_return_outlier_flags(
 
     g = out.groupby(group_col, sort=False)[ret_col]
 
-    # Lagged rolling median prevents the current observation from defining
-    # its own benchmark.
     roll_med = g.transform(
         lambda x: x.shift(1).rolling(
             window=window,
@@ -3484,9 +3375,6 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
     if "business_gap_days" not in model_panel.columns:
         raise ValueError("Required column not found: business_gap_days")
 
-    # ------------------------------------------------------------
-    # 1. Create gap-threshold flags
-    # ------------------------------------------------------------
     model_panel["has_valid_return"] = model_panel[return_col].notna()
 
     for gap in GAP_THRESHOLDS:
@@ -3525,10 +3413,7 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
     )
 
     write_return_outlier_diagnostics(model_panel)
-    # ------------------------------------------------------------
-    # 2. Save a full return panel with all gap flags
-    #    This is the key file for the FRED/CRSP merge and sensitivity analysis.
-    # ------------------------------------------------------------
+
     all_returns_panel = model_panel.loc[
         model_panel["has_valid_return"]
         & model_panel["business_gap_days"].notna()
@@ -3537,7 +3422,6 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
     all_returns_path = BOND_DAY_DIR / "trace_banks_final_model_ready_all_returns.parquet"
     all_returns_panel.to_parquet(all_returns_path, index=False)
 
-    # This panel is enough for the 1/3/5/10 sensitivity grid.
     sensitivity_panel = model_panel.loc[
         model_panel[f"valid_return_gap_{MAX_SENSITIVITY_GAP}bd"]
     ].copy()
@@ -3575,9 +3459,7 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
             TRACE_MODEL_READY_DIRTY_PATH,
             index=False,
         )
-    # ------------------------------------------------------------
-    # 3. Save separate gap-specific panels for convenience
-    # ------------------------------------------------------------
+
     gap_summary_rows = []
 
     for gap in GAP_THRESHOLDS:
@@ -3585,8 +3467,6 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
             model_panel[f"valid_return_gap_{gap}bd"]
         ].copy()
 
-        # Winsorized versions are computed within each gap threshold.
-        # This avoids using the gap5 distribution to winsorize gap1/gap3/gap10.
         for col in [
             return_col,
             "final_dirty_vwap_return",
@@ -3645,9 +3525,6 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
     gap_summary_path = DIAG_DIR / "model_ready_gap_sensitivity_summary.csv"
     gap_summary.to_csv(gap_summary_path, index=False)
 
-    # ------------------------------------------------------------
-    # 4. Keep the old gap5 file name for backward compatibility
-    # ------------------------------------------------------------
     baseline_panel = model_panel.loc[
         model_panel[f"valid_return_gap_{MODEL_READY_MAX_BUSINESS_GAP}bd"]
     ].copy()
@@ -3705,10 +3582,6 @@ def build_model_ready_panel(final_panel: pd.DataFrame) -> pd.DataFrame:
 
     return sensitivity_panel
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 def main() -> None:
     parquet_files = convert_raw_zips_to_parquet()
