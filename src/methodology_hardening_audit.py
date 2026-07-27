@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Post-run audit for the methodology-hardened dissertation pipeline.
+
+Run this script after all upstream model and signal scripts. It validates the
+point-in-time, sample-selection, prediction and payoff invariants introduced by
+the patch and writes a machine-readable audit table.
+"""
 
 import json
 from pathlib import Path

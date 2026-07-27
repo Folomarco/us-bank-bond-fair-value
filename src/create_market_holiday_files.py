@@ -1,3 +1,4 @@
+from pathlib import Path
 import pandas as pd
 
 from config_institutional import REFERENCE_DIR, ensure_directories
@@ -5,6 +6,8 @@ from config_institutional import REFERENCE_DIR, ensure_directories
 ensure_directories()
 REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
 
+# NYSE full-day market closures.
+# Includes Good Friday and full equity-market closures.
 NYSE_HOLIDAYS = [
     # 2016
     "2016-01-01", "2016-01-18", "2016-02-15", "2016-03-25",
@@ -57,6 +60,10 @@ NYSE_HOLIDAYS = [
     "2025-09-01", "2025-11-27", "2025-12-25",
 ]
 
+# TRACE OTC / SIFMA-style full-day fixed-income market closures.
+# This includes the usual fixed-income full closures, including Columbus Day
+# and Veterans Day, which are not NYSE holidays.
+# Early-close days are intentionally not listed as full holidays.
 TRACE_OTC_HOLIDAYS = [
     # 2016
     "2016-01-01", "2016-01-18", "2016-02-15", "2016-03-25",
@@ -66,7 +73,7 @@ TRACE_OTC_HOLIDAYS = [
     # 2017
     "2017-01-02", "2017-01-16", "2017-02-20", "2017-04-14",
     "2017-05-29", "2017-07-04", "2017-09-04", "2017-10-09",
-    "2017-11-10", "2017-11-23", "2017-12-25",
+    "2017-11-23", "2017-12-25",
 
     # 2018
     "2018-01-01", "2018-01-15", "2018-02-19", "2018-03-30",
@@ -84,9 +91,9 @@ TRACE_OTC_HOLIDAYS = [
     "2020-11-11", "2020-11-26", "2020-12-25",
 
     # 2021
-    "2021-01-01", "2021-01-18", "2021-02-15", "2021-04-02",
-    "2021-05-31", "2021-07-05", "2021-09-06", "2021-10-11",
-    "2021-11-11", "2021-11-25", "2021-12-24",
+    "2021-01-01", "2021-01-18", "2021-02-15", "2021-05-31",
+    "2021-07-05", "2021-09-06", "2021-10-11", "2021-11-11",
+    "2021-11-25", "2021-12-24",
 
     # 2022
     "2022-01-17", "2022-02-21", "2022-04-15", "2022-05-30",
@@ -94,9 +101,9 @@ TRACE_OTC_HOLIDAYS = [
     "2022-11-11", "2022-11-24", "2022-12-26",
 
     # 2023
-    "2023-01-02", "2023-01-16", "2023-02-20", "2023-04-07",
+    "2023-01-02", "2023-01-16", "2023-02-20",
     "2023-05-29", "2023-06-19", "2023-07-04", "2023-09-04",
-    "2023-10-09", "2023-11-10", "2023-11-23", "2023-12-25",
+    "2023-10-09", "2023-11-23", "2023-12-25",
 
     # 2024
     "2024-01-01", "2024-01-15", "2024-02-19", "2024-03-29",
