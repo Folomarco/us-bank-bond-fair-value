@@ -36,7 +36,6 @@ def main() -> None:
 
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Sample coverage
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     ax.plot(
         summary["gap_threshold_bd"],
@@ -54,7 +53,6 @@ def main() -> None:
     fig.savefig(coverage_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-    # Return-tail magnitude
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     ax.plot(
         summary["gap_threshold_bd"],
