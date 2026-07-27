@@ -1,12 +1,6 @@
 from pathlib import Path
 
 
-# ============================================================
-# PROJECT STRUCTURE
-# ============================================================
-
-# config.py is in dissertation/code/
-# therefore parents[1] is dissertation/
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 CODE_DIR = PROJECT_ROOT / "code"
@@ -14,9 +8,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
 REFERENCE_DIR = DATA_DIR / "reference"
 
-# ============================================================
-# RAW DATA
-# ============================================================
 
 TRACE_RAW_PATTERN = "us_banks_[0-9][0-9].zip"
 TRACE_MASTER_ZIP = DATA_DIR / "liquid_us_banks_bonds.zip"
@@ -24,9 +15,6 @@ EQUITY_RAW_ZIP = DATA_DIR / "us_banks_stocks.zip"
 TRACE_HOLIDAY_PATH = REFERENCE_DIR / "market_holidays_trace_otc_2016_2025.csv"
 NYSE_HOLIDAY_PATH = REFERENCE_DIR / "market_holidays_nyse_2016_2025.csv"
 
-# ============================================================
-# PROCESSED DATA DIRECTORIES
-# ============================================================
 
 TRACE_PARQUET_DIR = PROCESSED_DIR / "trace_parquet"
 TRACE_CLEANED_TRADE_DIR = PROCESSED_DIR / "trace_cleaned_trades"
@@ -38,34 +26,22 @@ TRACE_CLEANING_DIAG_DIR = DIAGNOSTICS_DIR / "trace_cleaning"
 REGRESSION_DIR = PROCESSED_DIR / "regression"
 
 
-# ============================================================
-# GAP SENSITIVITY SETTINGS
-# ============================================================
-
 EQUITY_ASOF_TOLERANCE_DAYS = 3
 EQUITY_ASOF_TOLERANCES_DAYS = [0, 1, 3, 5, 10]
 MODEL_READY_MAX_BUSINESS_GAP = 5
 GAP_THRESHOLDS = [1, 3, 5, 10]
 MAX_SENSITIVITY_GAP = max(GAP_THRESHOLDS)
 
-# ============================================================
-# METHODOLOGICAL HARDENING SETTINGS
-# ============================================================
 
 TRAIN_END_DATE = "2023-01-01"
 
-# Main universe must be selected without using validation/test activity.
 LIQUID_UNIVERSE_MODE = "train_frozen"
 MIN_ACTIVE_DAYS = 100
 MIN_TOTAL_TRADES = 250
 
-# The available WRDS extract exposes status/format codes and message-sequence
-# references, but not the complete enhanced lifecycle control fields. The cleaner
-# therefore uses an auditable conservative message-sequence procedure.
 TRACE_STATUS_SCHEMA = "auto"
 TRACE_CLEANER_SCHEMA_VERSION = "2026-07-methodology-hardening-v5-mno-exactref-interval-join"
 
-# Maximum acceptable source age for daily market variables.
 CORE_FRED_MAX_SOURCE_AGE_DAYS = {
     "dgs2": 7,
     "dgs5": 7,
@@ -75,12 +51,10 @@ CORE_FRED_MAX_SOURCE_AGE_DAYS = {
     "sp500": 7,
 }
 
-# Full bond-day price history used for subsequent-return calculations.
 TRACE_BOND_DAY_FULL_PATH = (
     BOND_DAY_DIR / "trace_banks_bond_day.parquet"
 )
 
-# Alternative liquid-universe outputs retained for audit/robustness.
 TRACE_BOND_DAY_LIQUID_EXPOST_PATH = (
     BOND_DAY_DIR / "trace_banks_bond_day_liquid_expost.parquet"
 )
@@ -90,13 +64,8 @@ TRACE_BOND_DAY_LIQUID_POINT_IN_TIME_PATH = (
 )
 
 
-# ============================================================
-# MAIN PROCESSED FILES
-# ============================================================
-
 TRACE_FINAL_BASELINE_PANEL_PATH = BOND_DAY_DIR / "trace_banks_final_baseline_panel.parquet"
-# Price-level source for convergence payoffs. This contains every valid
-# observation in the final security universe before the trading-gap filter.
+
 TRACE_CONVERGENCE_PRICE_PATH = TRACE_FINAL_BASELINE_PANEL_PATH
 TRACE_MODEL_READY_PATH = BOND_DAY_DIR / "trace_banks_final_model_ready_gap_sensitivity.parquet"
 TRACE_MODEL_READY_GAP5_PATH = BOND_DAY_DIR / "trace_banks_final_model_ready_gap5.parquet"
@@ -117,10 +86,6 @@ FINAL_PANEL_INTEGRITY_REPORT_PATH = DIAGNOSTICS_DIR / "final_panel_integrity_rep
 REGRESSION_PANEL_INTEGRITY_REPORT_PATH = REGRESSION_DIR / "regression_panel_integrity_report.csv"
 
 
-# ============================================================
-# MILESTONE 1 OUTPUTS
-# ============================================================
-
 MILESTONE_DIR = PROJECT_ROOT / "milestone1"
 NOTEBOOK_DIR = MILESTONE_DIR / "notebook"
 OUTPUTS_DIR = MILESTONE_DIR / "outputs"
@@ -129,10 +94,6 @@ FIGURES_DIR = OUTPUTS_DIR / "figures"
 TABLES_DIR = OUTPUTS_DIR / "tables"
 SUBMISSION_DIR = MILESTONE_DIR / "submission"
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def ensure_directories() -> None:
     """Create all output directories used by the project."""
