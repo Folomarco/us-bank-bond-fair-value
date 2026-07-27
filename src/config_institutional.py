@@ -96,7 +96,6 @@ SUBMISSION_DIR = MILESTONE_DIR / "submission"
 
 
 def ensure_directories() -> None:
-    """Create all output directories used by the project."""
     for path in [
         REFERENCE_DIR,
         PROCESSED_DIR,
