@@ -1,33 +1,5 @@
 from __future__ import annotations
 
-"""
-Residual-based fair-value dislocation engine for the TRACE-FRED-CRSP panel.
-
-This script starts from the outputs of peer_factor_models.py / peer_factor_models_v3.py.
-It treats M4 as the main economic fair-value model and M5 as the price-quality
-adjusted extension.
-
-Main tasks:
-    1. Load M4 and M5 predictions/residuals from peer_baseline_gap5_model_predictions.parquet.
-    2. Build past-only residual z-scores, avoiding full-sample standardisation.
-    3. Classify candidate rich/cheap dislocation events.
-    4. Compare M4 residuals with M5 residuals to flag microstructure-sensitive signals.
-    5. Test simple future mean reversion over the next 1, 3 and 5 bond observations.
-    6. Repeat the mean-reversion test with a one-observation skip window.
-    7. Save filtered top-event tables and event-rate diagnostics.
-    8. Add time-to-convergence diagnostics for residual normalisation, half-life and sign flip.
-    9. Add stylised unhedged and peer-hedged signal P&L with transaction-cost scenarios.
-    10. Save tables and figures for the dissertation.
-
-Important interpretation:
-    - M4 residuals are the main fair-value residuals.
-    - M5 residuals are used to understand whether residual variation is absorbed by
-      contemporaneous price-quality / microstructure variables.
-    - Positive residuals mean the bond outperformed model-implied fair value.
-    - Negative residuals mean the bond underperformed model-implied fair value.
-    - Rich/cheap labels are therefore directional candidate labels, not trading advice.
-"""
-
 import json
 from pathlib import Path
 
@@ -45,9 +17,6 @@ from config_institutional import (
 )
 
 
-# ============================================================
-# SETTINGS
-# ============================================================
 
 GROUP_COL = "cusip_id"
 DATE_COL = "date"
@@ -62,80 +31,57 @@ M5_MODEL = "M5_rates_equity_vix_peer_raw_microstructure_clean"
 M3_MODEL = "M3_rates_equity_vix"
 M1_MODEL = "M1_rates"
 
-# Candidate-event thresholds.
 Z_CANDIDATE_THRESHOLD = 2.0
 Z_SEVERE_THRESHOLD = 3.0
 
-# Past-only standardisation requirements.
 MIN_CUSIP_HISTORY_OBS = 20
 CUSIP_ROLLING_WINDOW_OBS = 60
 MIN_GROUP_HISTORY_OBS = 100
 MIN_GLOBAL_HISTORY_OBS = 500
 
-# Future realised-return horizons, measured in next valid observations of the same CUSIP.
 FUTURE_HORIZONS = [1, 3, 5]
 
-# Skip-window future returns are retained only as a robustness diagnostic.
-# The headline fixed-horizon payoff uses the first h post-signal observations
-# directly, i.e. t+1, ..., t+h.
 SKIP_OBS_FOR_FUTURE_RETURNS = 1
 
-# Robust z-score diagnostics. The main signal remains the past-only
-# issuer-maturity/CUSIP/global z-score, but robust median/MAD z-scores
-# help identify events driven by an unusually small historical standard
-# deviation estimate.
 MIN_ROBUST_GROUP_HISTORY_OBS = 100
 MAD_TO_SIGMA = 1.4826
 ROBUST_SIGMA_FLOOR_MULTIPLE = 0.05
 
-# M5-based diagnostic threshold. If M5 absorbs at least this fraction of the M4
-# absolute residual, the event is flagged as microstructure-sensitive.
 M5_ABS_RESIDUAL_REDUCTION_THRESHOLD = 0.50
 
-# Convergence and stylised signal-P&L diagnostics.
 MAX_CONVERGENCE_HORIZON_OBS = 10
 CONVERGENCE_Z_THRESHOLD = 1.0
 HALF_RESIDUAL_FRACTION = 0.50
 TRANSACTION_COST_SCENARIOS_BPS = [0, 5, 10, 25, 50]
 PEER_HEDGE_FACTOR_COL = "peer_raw_bank_sector_maturity"
-# Main fixed-horizon payoff diagnostic.
-# It uses the first h post-signal valid observations directly, without skipping
-# the first subsequent observation.
+
 FIXED_HORIZON_MAIN_HORIZON_OBS = 5
 FIXED_HORIZON_MAIN_COST_BPS = 10
 FIXED_HORIZON_MAIN_PNL_COL = (
     f"unhedged_signal_pnl_{FIXED_HORIZON_MAIN_HORIZON_OBS}obs"
     f"_net_{FIXED_HORIZON_MAIN_COST_BPS}bp"
 )
-# Event-driven convergence payoff diagnostic.
-# This is not a full executable trading backtest: entries/exits are marked using
-# observed TRACE VWAP observations. It is designed to replace the arbitrary
-# fixed-horizon headline payoff with a convergence-based event diagnostic.
 EVENT_STRATEGY_SPLITS = ["validation", "test"]
 EVENT_STRATEGY_ENTRY_THRESHOLDS = [2.0, 2.5, 3.0]
 EVENT_STRATEGY_EXIT_Z = 1.0
 EVENT_STRATEGY_MAX_HOLDING_OBS = 30
 EVENT_STRATEGY_COSTS_BPS = [0, 5, 10, 25, 50]
 EVENT_STRATEGY_HIGH_CONFIDENCE_CLASS = "high_confidence_dislocation_candidate"
-# Fair-value uncertainty intervals calibrated on validation residuals.
+
 INTERVAL_CALIBRATION_SPLIT = "validation"
 INTERVAL_EVALUATION_SPLITS = ["validation", "test"]
 PREDICTION_INTERVAL_LEVELS = [0.90, 0.95]
 
-# P&L uncertainty.
+
 PNL_BOOTSTRAP_N = 2000
 PNL_BOOTSTRAP_SEED = 42
 PNL_BOOTSTRAP_BLOCK_COL = "_event_month"
 
-# Optional price-quality flags.
+
 LOW_TRADE_COUNT_THRESHOLD = 1
 HIGH_GAP_WARNING_THRESHOLD = 3
 QUALITY_TRAIN_QUANTILE = 0.95
 
-
-# ============================================================
-# PATHS
-# ============================================================
 
 PREDICTIONS_PATH = REGRESSION_DIR / "peer_baseline_gap5_model_predictions.parquet"
 PANEL_WITH_PEERS_PATH = REGRESSION_DIR / "regression_panel_gap5_with_peer_factors.parquet"
@@ -191,9 +137,6 @@ FIG_FIXED_HORIZON_HEADLINE_VS_SKIP1 = FIGURES_DIR / "dislocation_fixed_horizon_h
 FIG_EVENT_DRIVEN_STRATEGY_CUMULATIVE = FIGURES_DIR / "dislocation_event_driven_strategy_cumulative_test_bond_net10bp.png"
 
 
-# ============================================================
-# BASIC HELPERS
-# ============================================================
 
 def _assert_columns(df: pd.DataFrame, cols: list[str], context: str) -> None:
     missing = [c for c in cols if c not in df.columns]
@@ -219,10 +162,6 @@ def _read_required_parquet(path: Path, description: str) -> pd.DataFrame:
 def _available(cols: list[str], df: pd.DataFrame) -> list[str]:
     return [c for c in cols if c in df.columns]
 
-
-# ============================================================
-# LOAD AND MERGE MODEL RESIDUALS
-# ============================================================
 
 def load_prediction_block(predictions_path: Path = PREDICTIONS_PATH) -> pd.DataFrame:
     preds = _read_required_parquet(predictions_path, "peer model predictions")
@@ -258,7 +197,6 @@ def load_prediction_block(predictions_path: Path = PREDICTIONS_PATH) -> pd.DataF
 
 
 def build_m4_m5_signal_base(preds: pd.DataFrame) -> pd.DataFrame:
-    """Create one row per M4 observation, with M5 residuals merged when available."""
     key_cols = [GROUP_COL, DATE_COL]
     if "_sample_index" in preds.columns:
         key_cols = ["_sample_index", GROUP_COL, DATE_COL]
@@ -310,9 +248,6 @@ def build_m4_m5_signal_base(preds: pd.DataFrame) -> pd.DataFrame:
     return signals
 
 
-# ============================================================
-# PAST-ONLY STANDARDISATION
-# ============================================================
 
 def _cusip_rolling_zscore(
     df: pd.DataFrame,
@@ -321,7 +256,6 @@ def _cusip_rolling_zscore(
     window: int = CUSIP_ROLLING_WINDOW_OBS,
     min_obs: int = MIN_CUSIP_HISTORY_OBS,
 ) -> pd.DataFrame:
-    """Rolling CUSIP-level z-score using only past observations of the same CUSIP."""
     out = df.copy().sort_values([GROUP_COL, DATE_COL]).reset_index(drop=True)
 
     def past_rolling_mean(x: pd.Series) -> pd.Series:
@@ -357,13 +291,6 @@ def _past_expanding_stats_by_group_date(
     out_prefix: str,
     min_obs: int,
 ) -> pd.DataFrame:
-    """
-    Past-only expanding z-score by group/date.
-
-    For each group-date, the mean and standard deviation are computed using
-    observations from strictly earlier dates only. This avoids using same-day
-    cross-sectional residuals when standardising a current residual.
-    """
     out = df.copy()
     out[DATE_COL] = pd.to_datetime(out[DATE_COL], errors="coerce")
 
@@ -430,7 +357,6 @@ def _past_expanding_stats_by_group_date(
 def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
     out = signals.copy()
 
-    # CUSIP-level rolling z-scores.
     out = _cusip_rolling_zscore(
         out,
         value_col="m4_residual_return",
@@ -446,7 +372,6 @@ def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
         min_obs=MIN_CUSIP_HISTORY_OBS,
     )
 
-    # Issuer/maturity-bucket expanding z-scores using strictly previous dates.
     group_cols = [c for c in [ISSUER_COL, MATURITY_BUCKET_COL] if c in out.columns]
     out = _past_expanding_stats_by_group_date(
         out,
@@ -462,10 +387,6 @@ def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
         out_prefix="m5_issuer_maturity",
         min_obs=MIN_GROUP_HISTORY_OBS,
     )
-
-    # Gap-conditioned robustness score. Residual variance can differ between
-    # one-day and multi-day TRACE intervals even after driver alignment. This
-    # score is diagnostic and does not replace the pre-specified main signal.
     if "business_gap_days" in out.columns:
         out["residual_gap_bucket"] = pd.cut(
             pd.to_numeric(out["business_gap_days"], errors="coerce"),
@@ -483,7 +404,6 @@ def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
             min_obs=MIN_GROUP_HISTORY_OBS,
         )
 
-    # Global expanding z-scores using strictly previous dates.
     out = _past_expanding_stats_by_group_date(
         out,
         value_col="m4_residual_return",
@@ -499,8 +419,6 @@ def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
         min_obs=MIN_GLOBAL_HISTORY_OBS,
     )
 
-    # Main z-score: use issuer-maturity if available; fall back to CUSIP rolling;
-    # then global expanding. This keeps a usable but still past-only signal.
     out["m4_z_main"] = out["m4_issuer_maturity_z"]
     out["m4_z_main_source"] = pd.Series(pd.NA, index=out.index, dtype="object")
     out.loc[out["m4_z_main"].notna(), "m4_z_main_source"] = "issuer_maturity_past"
@@ -526,7 +444,6 @@ def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
             "m4_issuer_maturity_gap_z"
         ].abs()
 
-    # Main past-only residual scale used for uncertainty intervals.
     out["m4_sigma_main"] = np.nan
     out.loc[out["m4_z_main_source"].eq("issuer_maturity_past"), "m4_sigma_main"] = out.loc[
         out["m4_z_main_source"].eq("issuer_maturity_past"),
@@ -552,9 +469,6 @@ def add_past_only_zscores(signals: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def _empirical_conformal_quantile(scores: pd.Series, level: float) -> float:
-    """
-    Conservative empirical quantile for absolute scaled errors.
-    """
     x = pd.to_numeric(scores, errors="coerce").dropna().to_numpy(dtype=float)
     if len(x) == 0:
         return np.nan
@@ -566,14 +480,6 @@ def _empirical_conformal_quantile(scores: pd.Series, level: float) -> float:
 
 
 def add_fair_value_prediction_intervals(signals: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add validation-calibrated fair-value prediction intervals for M4.
-
-    The interval is:
-        m4_fitted_return +/- q_level * m4_sigma_main
-
-    where q_level is calibrated from validation absolute scaled residuals.
-    """
     out = signals.copy()
 
     required = [
@@ -657,9 +563,6 @@ def build_fair_value_interval_coverage(signals: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-# ============================================================
-# ROBUST PAST-ONLY Z-SCORE DIAGNOSTICS
-# ============================================================
 
 def _robust_past_group_zscore(
     df: pd.DataFrame,
@@ -668,14 +571,6 @@ def _robust_past_group_zscore(
     out_prefix: str,
     min_obs: int = MIN_ROBUST_GROUP_HISTORY_OBS,
 ) -> pd.DataFrame:
-    """
-    Robust median/MAD z-score using strictly previous dates within a group.
-
-    This is slower than the standard-deviation version but still small enough
-    for the TRACE peer sample because it loops over issuer-maturity date groups.
-    For each group-date, the historical median and MAD are computed using all
-    earlier dates only; same-date observations are not used in their own scale.
-    """
     out = df.copy()
     out[DATE_COL] = pd.to_datetime(out[DATE_COL], errors="coerce")
 
@@ -755,14 +650,10 @@ def add_robust_zscore_diagnostics(signals: pd.DataFrame) -> pd.DataFrame:
     )
     return out
 
-# ============================================================
-# EVENT CLASSIFICATION
-# ============================================================
 
 def add_price_quality_flags(signals: pd.DataFrame) -> pd.DataFrame:
     out = signals.copy()
 
-    # Training-sample thresholds for continuous price-quality controls.
     train_mask = out[SPLIT_COL].eq("train") if SPLIT_COL in out.columns else pd.Series(False, index=out.index)
 
     for col in ["price_dispersion_rel_filled", "price_range_rel_filled"]:
@@ -856,19 +747,12 @@ def classify_dislocation_events(signals: pd.DataFrame) -> pd.DataFrame:
     )
     out.loc[high_conf, "signal_quality_class"] = "high_confidence_dislocation_candidate"
 
-    # If an event is both price-quality-warning and microstructure-sensitive,
-    # keep the microstructure label because it directly uses the M5 comparison.
     out.loc[micro_sensitive, "signal_quality_class"] = "microstructure_sensitive"
 
     return out
 
 
-# ============================================================
-# FUTURE RETURNS AND MEAN REVERSION
-# ============================================================
-
 def _load_convergence_price_path() -> pd.DataFrame:
-    """Load the unfiltered-by-gap price path in the final security universe."""
     if not TRACE_CONVERGENCE_PRICE_PATH.exists():
         raise FileNotFoundError(
             f"Missing convergence price path: {TRACE_CONVERGENCE_PRICE_PATH}. "
@@ -904,13 +788,6 @@ def _load_convergence_price_path() -> pd.DataFrame:
 
 
 def add_future_returns(signals: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute entry-to-exit returns from price levels, not from a filtered sum.
-
-    The h-observation payoff ends at the h-th subsequent valid observation in
-    the final bond universe. This remains correct when intermediate rows are
-    absent from the peer-complete or gap-filtered regression sample.
-    """
     out = signals.copy()
     price = _load_convergence_price_path()
     grouped_price = price.groupby(GROUP_COL)["_log_vwap_price"]
@@ -922,8 +799,6 @@ def add_future_returns(signals: pd.DataFrame) -> pd.DataFrame:
         )
         price[f"future_exit_date_{h}obs"] = grouped_date.shift(-h)
 
-        # Skip-one diagnostic: return from the first subsequent mark to the
-        # (h+1)-th subsequent mark, excluding the immediate post-event move.
         price[f"future_return_skip1_{h}obs"] = (
             grouped_price.shift(-(h + 1)) - grouped_price.shift(-1)
         )
@@ -986,15 +861,6 @@ def add_future_returns(signals: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_convergence_and_strategy_metrics(signals: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add time-to-convergence diagnostics and retain stylised signal-P&L columns.
-
-    Convergence is measured in future valid observations of the same CUSIP.
-    Three definitions are recorded:
-      1. abs z-score falls below CONVERGENCE_Z_THRESHOLD;
-      2. absolute residual falls below HALF_RESIDUAL_FRACTION of its event value;
-      3. residual changes sign.
-    """
     out = signals.copy().sort_values([GROUP_COL, DATE_COL]).reset_index(drop=True)
 
     for k in range(1, MAX_CONVERGENCE_HORIZON_OBS + 1):
@@ -1102,7 +968,6 @@ def build_mean_reversion_summary(signals: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_mean_reversion_by_side_and_quality(signals: pd.DataFrame) -> pd.DataFrame:
-    """Mean-reversion diagnostics split by residual side, signal quality and severity."""
     test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -1172,7 +1037,6 @@ def build_mean_reversion_by_side_and_quality(signals: pd.DataFrame) -> pd.DataFr
 
 
 def build_convergence_event_table(signals: pd.DataFrame) -> pd.DataFrame:
-    """One row per candidate event with convergence and P&L diagnostics."""
     test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -1207,7 +1071,6 @@ def build_convergence_event_table(signals: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_convergence_summary(signals: pd.DataFrame) -> pd.DataFrame:
-    """Convergence summary by side, quality class and severity."""
     test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -1239,7 +1102,6 @@ def build_convergence_summary(signals: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_strategy_pnl_event_table(signals: pd.DataFrame) -> pd.DataFrame:
-    """One row per candidate event with unhedged and peer-hedged stylised P&L."""
     test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -1279,7 +1141,6 @@ def build_strategy_pnl_event_table(signals: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_strategy_pnl_summary(signals: pd.DataFrame) -> pd.DataFrame:
-    """Summarise stylised signal P&L by side, signal quality and severity."""
     test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -1347,8 +1208,6 @@ def _bootstrap_mean_ci_by_month(
     rng = np.random.default_rng(seed)
     blocks = valid[block_col].dropna().unique()
 
-    # If there are at least two months, use monthly block bootstrap.
-    # Otherwise, fall back to event-level bootstrap.
     if len(blocks) >= 2:
         block_values = {
             block: valid.loc[valid[block_col].eq(block), value_col].to_numpy(dtype=float)
@@ -1387,7 +1246,6 @@ def _bootstrap_mean_ci_by_cluster(
     n_boot: int = PNL_BOOTSTRAP_N,
     seed: int = PNL_BOOTSTRAP_SEED + 101,
 ) -> dict:
-    """Cluster bootstrap that preserves dependence within a CUSIP."""
     valid = g[[value_col, cluster_col]].copy()
     valid[value_col] = pd.to_numeric(valid[value_col], errors="coerce")
     valid = valid.dropna(subset=[value_col, cluster_col])
@@ -1431,16 +1289,7 @@ def _bootstrap_mean_ci_by_cluster(
 
 
 def build_strategy_pnl_uncertainty(signals: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add sampling uncertainty around stylised signal P&L.
-
-    This answers:
-        what is the mean P&L,
-        what is the hit rate,
-        how bad is the left tail,
-        and how uncertain is the mean estimate?
-    """
-    test = signals.loc[
+       test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
 
@@ -1546,7 +1395,6 @@ def build_strategy_pnl_uncertainty(signals: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 def build_fixed_horizon_attrition(signals: pd.DataFrame) -> pd.DataFrame:
-    """Compare candidate events with and without a complete five-mark horizon."""
     future_col = f"future_return_{FIXED_HORIZON_MAIN_HORIZON_OBS}obs"
     test = signals.loc[
         signals[SPLIT_COL].eq("test")
@@ -1597,10 +1445,6 @@ def build_fixed_horizon_attrition(signals: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(group_cols).reset_index(drop=True)
 
 
-# ============================================================
-# EVENT-DRIVEN CONVERGENCE PAYOFF DIAGNOSTIC
-# ============================================================
-
 def _event_strategy_entry_condition(z_value: float, side: str, threshold: float) -> bool:
     if pd.isna(z_value):
         return False
@@ -1615,30 +1459,13 @@ def _event_strategy_exit_condition(z_value: float, side: str) -> bool:
     if pd.isna(z_value):
         return False
     if side == "cheap":
-        # A cheap trade exits when the residual is no longer strongly cheap.
         return float(z_value) >= -EVENT_STRATEGY_EXIT_Z
     if side == "rich":
-        # A rich trade exits when the residual is no longer strongly rich.
         return float(z_value) <= EVENT_STRATEGY_EXIT_Z
     raise ValueError(f"Unknown event-strategy side: {side}")
 
 
 def build_event_driven_strategy_trades(signals: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build a simple event-driven convergence payoff diagnostic.
-
-    Design:
-      - high-confidence M4 candidate events only;
-      - cheap and rich signals are evaluated separately;
-      - entry is marked at the event observation VWAP;
-      - exit is the first later observation where the z-score is no longer
-        strongly dislocated in the entry direction, or a 30-observation time stop;
-      - no entry lag, no averaging down, no pyramiding, no overlapping trades
-        for the same CUSIP/side/threshold/split;
-      - payoff is measured directly from entry and exit VWAP price levels.
-
-    The payoff is in return units, not dollar P&L.
-    """
     required = [
         SPLIT_COL,
         GROUP_COL,
@@ -1716,7 +1543,6 @@ def build_event_driven_strategy_trades(signals: pd.DataFrame) -> pd.DataFrame:
                         if exit_pos is None:
                             exit_pos = max_exit_pos
                             if exit_pos == pos:
-                                # No later observation is available.
                                 pos += 1
                                 continue
                             exit_reason = (
@@ -1783,7 +1609,6 @@ def build_event_driven_strategy_trades(signals: pd.DataFrame) -> pd.DataFrame:
 
                         rows.append(row)
 
-                        # No overlapping trades for the same CUSIP/side/threshold/split.
                         pos = exit_pos + 1
 
     if not rows:
@@ -1931,11 +1756,6 @@ def build_event_driven_strategy_cumulative(trades: pd.DataFrame) -> pd.DataFrame
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
-
-# ============================================================
-# SUMMARY TABLES
-# ============================================================
-
 def build_zscore_summary(signals: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for split, g in signals.groupby(SPLIT_COL, dropna=False):
@@ -2056,7 +1876,6 @@ def build_top_events(signals: pd.DataFrame, n: int = 100) -> pd.DataFrame:
 
 
 def build_filtered_top_event_tables(signals: pd.DataFrame, n: int = 100) -> dict[str, pd.DataFrame]:
-    """Return cleaner top-event views for reporting and manual inspection."""
     test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -2178,8 +1997,6 @@ def write_outputs(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
         index=False,
     )
 
-    # CSV can be large. Keep all columns but only test rows and candidate events
-    # for readability. The full output remains in parquet.
     signals_for_csv = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
@@ -2248,10 +2065,6 @@ def write_outputs(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
     class_summary["row_share"] = class_summary["rows"] / class_summary["rows"].sum()
     class_summary.to_csv(OUTPUT_SIGNAL_CLASS_SUMMARY, index=False)
 
-
-# ============================================================
-# PLOTS
-# ============================================================
 
 def plot_z_distribution(signals: pd.DataFrame) -> None:
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -2373,7 +2186,6 @@ def plot_m4_m5_residual_reduction(signals: pd.DataFrame) -> None:
     if test.empty:
         return
 
-    # Keep the plot readable by using a deterministic sample if needed.
     if len(test) > 50000:
         test = test.sample(n=50000, random_state=42)
 
@@ -2468,12 +2280,6 @@ def plot_strategy_pnl_summary(signals: pd.DataFrame) -> None:
 def plot_fixed_horizon_headline_vs_skip1_ci(
     signals: pd.DataFrame,
 ) -> None:
-    """Compare headline and skip-first fixed-horizon payoffs.
-
-    The figure uses high-confidence test events only and reports the
-    conservative 95% confidence interval combining calendar-month and
-    CUSIP-cluster bootstrap results.
-    """
     if OUTPUT_STRATEGY_PNL_UNCERTAINTY.exists():
         uncertainty = pd.read_csv(OUTPUT_STRATEGY_PNL_UNCERTAINTY)
     else:
@@ -2686,10 +2492,6 @@ def write_figures(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
     plot_event_driven_strategy_cumulative(signals)
 
 
-# ============================================================
-# MANIFEST
-# ============================================================
-
 def write_manifest(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
     manifest = {
         "script": "dislocation_signal_engine_v3.py",
@@ -2776,11 +2578,6 @@ def write_manifest(signals: pd.DataFrame, mean_reversion: pd.DataFrame) -> None:
 
     with open(OUTPUT_MANIFEST, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main() -> None:
     ensure_directories()
