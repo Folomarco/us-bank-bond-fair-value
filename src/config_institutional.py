@@ -2,7 +2,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-CODE_DIR = PROJECT_ROOT / "code"
 DATA_DIR = PROJECT_ROOT / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
 REFERENCE_DIR = DATA_DIR / "reference"
@@ -84,13 +83,10 @@ FINAL_PANEL_INTEGRITY_REPORT_PATH = DIAGNOSTICS_DIR / "final_panel_integrity_rep
 REGRESSION_PANEL_INTEGRITY_REPORT_PATH = REGRESSION_DIR / "regression_panel_integrity_report.csv"
 
 
-MILESTONE_DIR = PROJECT_ROOT / "milestone1"
-NOTEBOOK_DIR = MILESTONE_DIR / "notebook"
-OUTPUTS_DIR = MILESTONE_DIR / "outputs"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 RUN_MANIFEST_PATH = OUTPUTS_DIR / "run_manifest.json"
 FIGURES_DIR = OUTPUTS_DIR / "figures"
 TABLES_DIR = OUTPUTS_DIR / "tables"
-SUBMISSION_DIR = MILESTONE_DIR / "submission"
 
 
 def ensure_directories() -> None:
@@ -105,11 +101,9 @@ def ensure_directories() -> None:
         DIAGNOSTICS_DIR,
         TRACE_CLEANING_DIAG_DIR,
         REGRESSION_DIR,
-        NOTEBOOK_DIR,
         OUTPUTS_DIR,
         FIGURES_DIR,
         TABLES_DIR,
-        SUBMISSION_DIR,
     ]:
         path.mkdir(parents=True, exist_ok=True)
 
