@@ -78,10 +78,11 @@ to the restricted TRACE, TRACE Master File and CRSP inputs described above.
 
 ## Use of generative AI
 
-ChatGPT, including GPT-5.5 and GPT-5.6 Sol (OpenAI), was used to discuss
-technical concepts, review Python and LaTeX, and improve clarity. All
-suggestions were checked independently; the final code, modelling choices,
-analysis and interpretation are the author's own.
+I acknowledge the use of ChatGPT, specifically GPT-5.5 and GPT-5.6 Sol
+(OpenAI, https://chatgpt.com), to discuss technical concepts, review Python
+and LaTeX, and improve clarity. All suggestions were checked independently.
+The submitted work, including the final text, code, modelling choices,
+analysis and interpretation, is my own.
 
 ## Author
 
