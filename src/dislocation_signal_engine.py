@@ -1289,7 +1289,7 @@ def _bootstrap_mean_ci_by_cluster(
 
 
 def build_strategy_pnl_uncertainty(signals: pd.DataFrame) -> pd.DataFrame:
-       test = signals.loc[
+    test = signals.loc[
         signals[SPLIT_COL].eq("test") & signals["m4_candidate_flag"]
     ].copy()
 
