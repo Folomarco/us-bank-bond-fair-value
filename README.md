@@ -32,11 +32,15 @@ The analysis uses:
 - FRED Treasury, volatility and credit-market series.
 
 TRACE, TRACE Master File and CRSP data were accessed through WRDS and cannot
-be redistributed. The repository contains therefore no raw, row-level or reusable processed datasets
-derived from restricted WRDS files. It contains only source code,
-documentation and aggregate figures reproduced in the dissertation.
+be redistributed. The repository therefore contains no raw, row-level or
+reusable processed datasets derived from restricted WRDS files. It contains
+only source code, documentation and aggregate figures reproduced in the
+dissertation.
 
 Authorised users must supply their own local copies of the required inputs.
+
+Detailed input filenames and schema requirements are documented in
+[`data/README.md`](data/README.md).
 
 ## Repository structure
 
@@ -46,11 +50,19 @@ data/      Description of the required input data
 outputs/   Description of the generated model outputs
 figures/   Figures generated for the dissertation
 ```
+
 ## Environment
 
 The code was developed and tested with Python 3.10.2.
 
-Install the required packages with:
+For reproduction with the pinned direct dependency versions used for the
+final analysis, install:
+
+```bash
+pip install -r requirements-lock.txt
+```
+
+For a minimal installation without version pinning, use:
 
 ```bash
 pip install -r requirements.txt
@@ -68,7 +80,7 @@ Project-relative paths, input filenames and output directories are defined in
 ## Reproducibility
 
 The repository contains the final methodology-hardened source code used for the
-submitted dissertation, including the training-frozen sample construction,
+dissertation, including the training-frozen sample construction,
 point-in-time peer factors, static and dynamic fair-value models, direct VWAP
 convergence diagnostics and the final post-run audit.
 
